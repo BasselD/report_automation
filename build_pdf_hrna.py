@@ -8,6 +8,137 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 import re
+import math
+from datetime import datetime
+
+from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.graphics import colors
+from reportlab.platypus import Paragraph
+
+#heatmap color
+def pdc_color(pdc):
+    """
+    Returns None for missing data (blank cell)
+    """
+    if pdc is None:
+        return None
+
+    try:
+        if math.isnan(pdc):
+            return None
+    except TypeError:
+        pass
+
+    if pdc < 60:
+        return colors.HexColor("#DC2626")   # red
+    elif pdc < 80:
+        return colors.HexColor("#F59E0B")   # amber
+    else:
+        return colors.HexColor("#16A34A")   # green
+
+#heatmap drawing
+def pdc_heatmap(measure_rows, width=120, height_per_row=18):
+    """
+    measure_rows = [
+        ("Statin",   [pdc_yy2, pdc_yy1, pdc_yy]),
+        ("Diabetes", [...]),
+        ...
+    ]
+    """
+    if not measure_rows:
+        return Drawing(width, height_per_row)
+
+    rows = len(measure_rows)
+    cols = 3
+    height = rows * height_per_row
+
+    cell_w = width / cols
+    cell_h = height_per_row
+
+    d = Drawing(width, height)
+
+    for r, (_, values) in enumerate(measure_rows):
+        padded = (values + [None] * cols)[:cols]
+
+        for c, val in enumerate(padded):
+            color = pdc_color(val)
+            if color is None:
+                continue  # BLANK cell
+
+            d.add(Rect(
+                c * cell_w,
+                height - (r + 1) * cell_h,
+                cell_w,
+                cell_h,
+                fillColor=color,
+                strokeColor=colors.white,
+                strokeWidth=0.5
+            ))
+
+    return d
+# Dynamic year headers (2-digit format)
+def heatmap_year_headers(report_period_year):
+    """
+    Returns ['YY-2', 'YY-1', 'YY']
+    """
+    y = int(report_period_year)
+    return [
+        f"{str(y-2)[-2:]}",
+        f"{str(y-1)[-2:]}",
+        f"{str(y)[-2:]}"
+    ]
+#Heatmap legend (top-right of column header)
+def heatmap_legend(width=120, height=24):
+    d = Drawing(width, height)
+
+    items = [
+        ("< 60", colors.HexColor("#DC2626")),
+        ("60–79", colors.HexColor("#F59E0B")),
+        ("≥ 80", colors.HexColor("#16A34A")),
+    ]
+
+    x = 0
+    for label, color in items:
+        d.add(Rect(x, 8, 10, 10, fillColor=color, strokeColor=color))
+        d.add(String(x + 14, 10, label, fontSize=7))
+        x += 40
+
+    return d
+#Heatmap column header (labels + legend)
+def heatmap_header(report_period_year, styles):
+    years = heatmap_year_headers(report_period_year)
+
+    header = [
+        Paragraph(
+            f"<b>PDC History</b><br/>{years[0]}&nbsp;&nbsp;{years[1]}&nbsp;&nbsp;{years[2]}",
+            styles["TableHeader"]
+        ),
+        heatmap_legend()
+    ]
+
+    return header
+#Build measure rows safely (2 or 3 measures supported)
+def build_measure_rows(row):
+    measure_defs = [
+        ("Statin", "Statin"),
+        ("Diabetes", "Diabetes"),
+        ("RAS", "RAS")
+    ]
+
+    rows = []
+
+    for label, prefix in measure_defs:
+        values = [
+            row.get(f"{prefix}_PDC_Prior_2"),
+            row.get(f"{prefix}_PDC_Prior_1"),
+            row.get(f"{prefix}_PDC_Current"),
+        ]
+
+        if any(v is not None and not (isinstance(v, float) and math.isnan(v)) for v in values):
+            rows.append((label, values))
+
+    return rows
+
 
 # cleanup names in the file
 def safe_filename(value):
@@ -143,11 +274,17 @@ def build_provider_pdf(
     story.append(Paragraph(header_text, styles["HeaderText"]))
     story.append(Spacer(1, 12))
 
-    # Two wide columns
-    columns = ["Member Detail", "Adherence Breakdown"]
+    # --- Table headers (WITH heatmap header + legend) ---
+
+    heatmap_header_cell = heatmap_header(
+        report_period_year=report_period[-4:],  # e.g. "2026"
+        styles=styles
+    )
 
     table_data = [[
-        Paragraph(col, styles["TableHeader"]) for col in columns
+        Paragraph("Patient Details", styles["TableHeader"]),
+        Paragraph("Adherence Breakdown - Failed Measure(s)", styles["TableHeader"]),
+        Paragraph("PDC History<br/>24&nbsp;&nbsp;25&nbsp;&nbsp;26", styles["TableHeader"]),
     ]]
 
     for _, row in provider_df.iterrows():
@@ -182,6 +319,24 @@ def build_provider_pdf(
         ("RIGHTPADDING", (0, 0), (-1, -1), 8),
         ("BOTTOMPADDING", (0, 0), (-1, 0), 10),
     ]))
+    # --- Heatmap legend ABOVE the table, right-aligned ---
+
+    legend_table = Table(
+        [[ "", heatmap_legend() ]],
+        colWidths=[doc.width - 130, 130]  # pushes legend to the right
+    )
+    
+    legend_table.setStyle(TableStyle([
+        ("ALIGN", (1, 0), (1, 0), "RIGHT"),
+        ("VALIGN", (1, 0), (1, 0), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    
+    story.append(legend_table)
+    story.append(Spacer(1, 6))
 
     story.append(table)
 
