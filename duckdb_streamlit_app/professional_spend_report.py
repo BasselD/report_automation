@@ -19,6 +19,8 @@ import io
 #DATA_PATH = r"\\shared_drive\analytics\professional_spend.parquet"
 DATA_PATH = r"/Users/bassel_instructor/Documents/datasets/medicare_synthetic_12k.parquet"
 # Tip: also accepts CSV → DATA_PATH = r"\\shared_drive\...\file.csv"
+LOGO_PATH = r"logo.png"   # Set to your logo file path; supports PNG/JPG
+BANNER_COLOR = "rgb(0, 40, 80)"
 
 C = {
     "paid":      "TotalPaid",
@@ -27,7 +29,7 @@ C = {
     "claim":     "ClaimID",
     "procedure": "ProcedureCode",
     "proc_desc": "ProcedureDesc",
-    "network":   "NetworkStatus", # values: INN / OON
+    "network":   "NetworkStatus",
     "market":    "OperationalMarket",
     "submarket": "OperationalSubMarket",
     "plan":      "PlanType",
@@ -50,6 +52,7 @@ GRANULARITY_OPTIONS = {
     "Provider":        C["provider"],
     "Procedure Code":  C["procedure"],
 }
+GRANULARITY_DEFAULT = "Managing Entity"
 
 # ══════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -57,34 +60,64 @@ GRANULARITY_OPTIONS = {
 st.set_page_config(
     page_title="Professional Spend Analytics",
     layout="wide",
-    #page_icon="🏥",
+    #page_icon=":chart_with_upwards_trend:"
     initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
-    /* Global font */
     html, body, [class*="css"] { font-family: "Segoe UI", sans-serif; }
+    .block-container { padding-top: 0rem; padding-bottom: 2rem; }
 
-    /* Remove default top padding */
-    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
+    /* Banner */
+    .app-banner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 28px;
+        margin-bottom: 1.4rem;
+        border-radius: 0 0 6px 6px;
+    }
+    .banner-title {
+        color: #ffffff;
+        font-size: 1.45rem;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        margin: 0;
+    }
+    .banner-subtitle {
+        color: rgba(255,255,255,0.65);
+        font-size: 0.78rem;
+        margin: 3px 0 0;
+        font-weight: 400;
+    }
+    .banner-logo {
+        height: 44px;
+        object-fit: contain;
+    }
+    .banner-logo-placeholder {
+        color: rgba(255,255,255,0.5);
+        font-size: 0.72rem;
+        font-style: italic;
+    }
 
-    /* KPI Cards — white background, fixed height, consistent layout */
+    /* KPI Cards */
     .kpi-card {
         background-color: #ffffff;
         border-radius: 8px;
-        padding: 20px 16px 16px;
+        padding: 0 16px;
         text-align: center;
         border-top: 3px solid #1f5ea8;
         box-shadow: 0 1px 4px rgba(0,0,0,0.08);
-        height: 100px;
+        height: 90px;
         display: flex;
         flex-direction: column;
         justify-content: center;
+        align-items: center;
     }
     .kpi-card-warn { border-top-color: #c0392b; }
     .kpi-label {
-        font-size: 0.70rem;
+        font-size: 0.68rem;
         color: #6b7280;
         text-transform: uppercase;
         letter-spacing: 0.06em;
@@ -92,14 +125,18 @@ st.markdown("""
         font-weight: 600;
     }
     .kpi-value {
-        font-size: 1.55rem;
+        font-size: 1.5rem;
         font-weight: 700;
         color: #111827;
         margin-top: 4px;
         white-space: nowrap;
     }
 
-    /* Section labels */
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background-color: #f9fafb;
+        border-right: 1px solid #e5e7eb;
+    }
     .section-label {
         font-size: 0.70rem;
         font-weight: 600;
@@ -108,14 +145,39 @@ st.markdown("""
         letter-spacing: 0.07em;
         margin: 10px 0 4px;
     }
-
-    /* Sidebar */
-    section[data-testid="stSidebar"] {
-        background-color: #f9fafb;
-        border-right: 1px solid #e5e7eb;
-    }
 </style>
 """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════
+#  BANNER WITH LOGO
+# ══════════════════════════════════════════════════════════════════
+def render_banner(title: str, subtitle: str, color: str, logo_path: str):
+    if Path(logo_path).exists():
+        with open(logo_path, "rb") as f:
+            ext  = Path(logo_path).suffix.lower().replace(".", "")
+            mime = "jpeg" if ext == "jpg" else ext
+            b64  = base64.b64encode(f.read()).decode()
+        logo_html = f'<img src="data:image/{mime};base64,{b64}" class="banner-logo" alt="logo">'
+    else:
+        logo_html = '<span class="banner-logo-placeholder">[ logo.png ]</span>'
+
+    st.markdown(f"""
+    <div class="app-banner" style="background-color:{color};">
+        <div>
+            <p class="banner-title">{title}</p>
+            <p class="banner-subtitle">{subtitle}</p>
+        </div>
+        {logo_html}
+    </div>
+    """, unsafe_allow_html=True)
+
+render_banner(
+    title    = "Professional Spend Analytics",
+    subtitle = "Powered by DuckDB  |  Local Browser",
+    color    = BANNER_COLOR,
+    logo_path= LOGO_PATH,
+)
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -123,42 +185,45 @@ st.markdown("""
 # ══════════════════════════════════════════════════════════════════
 def read_expr(path: str) -> str:
     ext = Path(path).suffix.lower()
-    if ext == ".csv":
-        return f"read_csv_auto(\'{path}\')"
-    return f"read_parquet(\'{path}\')"
+    return f"read_csv_auto('{path}')" if ext == ".csv" else f"read_parquet('{path}')"
 
 
 # ══════════════════════════════════════════════════════════════════
-#  FILTER OPTIONS LOADER
+#  CASCADING FILTER QUERY
+# ══════════════════════════════════════════════════════════════════
+@st.cache_data(ttl=300, show_spinner=False)
+def get_distinct_filtered(data_path: str, col: str, upstream: tuple) -> list:
+    """
+    Return distinct values for `col` constrained by upstream selections.
+    upstream = tuple of (column_name, selected_values_tuple) pairs
+    """
+    expr  = read_expr(data_path)
+    parts = []
+    for fc, fv in upstream:
+        if fv:
+            vals = ", ".join(f"'{v}'" for v in fv)
+            parts.append(f"{fc} IN ({vals})")
+    parts.append(f"{col} IS NOT NULL")
+    wc   = "WHERE " + " AND ".join(parts)
+    rows = duckdb.execute(
+        f"SELECT DISTINCT {col} FROM {expr} {wc} ORDER BY 1"
+    ).fetchall()
+    return [r[0] for r in rows]
+
+
+# ══════════════════════════════════════════════════════════════════
+#  DATE RANGE LOADER
 # ══════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=3600, show_spinner="Connecting to data source...")
-def load_filter_options(data_path: str):
+def load_date_range(data_path: str):
     if not Path(data_path).exists():
         return None, f"File not found:\n{data_path}"
-    expr = read_expr(data_path)
-    conn = duckdb.connect()
-
-    def distinct(col):
-        rows = conn.execute(
-            f"SELECT DISTINCT {col} FROM {expr} WHERE {col} IS NOT NULL ORDER BY 1"
-        ).fetchall()
-        return [r[0] for r in rows]
-
     try:
-        date_range = conn.execute(
+        expr = read_expr(data_path)
+        r    = duckdb.execute(
             f"SELECT MIN({C['date']}), MAX({C['date']}) FROM {expr}"
         ).fetchone()
-        opts = {
-            "markets":  distinct(C["market"]),
-            "plans":    distinct(C["plan"]),
-            "entities": distinct(C["entity"]),
-            "pods":     distinct(C["pod"]),
-            "specs":    distinct(C["specialty"]),
-            "date_min": pd.to_datetime(date_range[0]),
-            "date_max": pd.to_datetime(date_range[1]),
-        }
-        conn.close()
-        return opts, None
+        return (pd.to_datetime(r[0]), pd.to_datetime(r[1])), None
     except Exception as e:
         return None, str(e)
 
@@ -169,24 +234,22 @@ def load_filter_options(data_path: str):
 def where_clause(markets, plans, entities, pods, specs, d_start, d_end) -> str:
     parts = []
     if markets:
-        vals = ", ".join(f"\'{v}\'" for v in markets)
+        vals = ", ".join(f"'{v}'" for v in markets)
         parts.append(f"{C['market']} IN ({vals})")
     if plans:
-        vals = ", ".join(f"\'{v}\'" for v in plans)
+        vals = ", ".join(f"'{v}'" for v in plans)
         parts.append(f"{C['plan']} IN ({vals})")
     if entities:
-        vals = ", ".join(f"\'{v}\'" for v in entities)
+        vals = ", ".join(f"'{v}'" for v in entities)
         parts.append(f"{C['entity']} IN ({vals})")
     if pods:
-        vals = ", ".join(f"\'{v}\'" for v in pods)
+        vals = ", ".join(f"'{v}'" for v in pods)
         parts.append(f"{C['pod']} IN ({vals})")
     if specs:
-        vals = ", ".join(f"\'{v}\'" for v in specs)
+        vals = ", ".join(f"'{v}'" for v in specs)
         parts.append(f"{C['specialty']} IN ({vals})")
     if d_start and d_end:
-        parts.append(
-            f"CAST({C['date']} AS DATE) BETWEEN \'{d_start}\' AND \'{d_end}\'"
-        )
+        parts.append(f"CAST({C['date']} AS DATE) BETWEEN '{d_start}' AND '{d_end}'")
     return ("WHERE " + " AND ".join(parts)) if parts else ""
 
 
@@ -202,11 +265,11 @@ def get_kpis(data_path: str, wc: str) -> pd.DataFrame:
         SUM({C['allowed']})                                             AS total_allowed,
         COUNT(DISTINCT {C['member']})                                   AS unique_members,
         COUNT(DISTINCT {C['procedure']})                                AS unique_procedures,
-        ROUND(SUM({C['paid']}) / NULLIF(COUNT({C['claim']}), 0), 2)  AS avg_paid_per_claim,
+        ROUND(SUM({C['paid']}) / NULLIF(COUNT({C['claim']}), 0), 2)    AS avg_paid_per_claim,
         ROUND(
             SUM(CASE WHEN {C['network']} = 'OON' THEN {C['paid']} ELSE 0 END)
             / NULLIF(SUM({C['paid']}), 0) * 100, 1
-        )                                                                 AS pct_oon
+        )                                                               AS pct_oon
     FROM {expr}
     {wc}
     """
@@ -228,22 +291,19 @@ def get_scatter(data_path: str, wc: str, gran_col: str) -> pd.DataFrame:
     ),
     grouped AS (
         SELECT
-            {gran_col}                                                                 AS dimension,
-            ROUND(SUM({C['paid']}) / NULLIF(COUNT({C['claim']}), 0), 2)           AS avg_cost_per_claim,
-            COUNT({C['claim']})                                                      AS claim_count,
-            ROUND(SUM({C['paid']}) / NULLIF(COUNT(DISTINCT {C['member']}), 0), 2) AS paid_per_member,
-            MODE({C['specialty']})                                                   AS specialty_mode,
-            MODE({C['network']})                                                     AS network_mode,
-            ROUND(AVG({C['risk']}), 3)                                               AS avg_risk
+            {gran_col}                                                                    AS dimension,
+            ROUND(SUM({C['paid']}) / NULLIF(COUNT({C['claim']}), 0), 2)                  AS avg_cost_per_claim,
+            COUNT({C['claim']})                                                           AS claim_count,
+            ROUND(SUM({C['paid']}) / NULLIF(COUNT(DISTINCT {C['member']}), 0), 2)        AS paid_per_member,
+            MODE({C['specialty']})                                                        AS specialty_mode,
+            MODE({C['network']})                                                          AS network_mode,
+            ROUND(AVG({C['risk']}), 3)                                                   AS avg_risk
         FROM filtered
         GROUP BY {gran_col}
         HAVING COUNT({C['claim']}) > 0
     )
-    SELECT
-        g.*,
-        ROUND(g.avg_cost_per_claim - ga.grand_mean, 2) AS cost_deviation
-    FROM grouped g
-    CROSS JOIN grand_avg ga
+    SELECT g.*, ROUND(g.avg_cost_per_claim - ga.grand_mean, 2) AS cost_deviation
+    FROM grouped g CROSS JOIN grand_avg ga
     ORDER BY g.claim_count DESC
     LIMIT 500
     """
@@ -273,47 +333,84 @@ def fmt_int(v):
 
 
 # ════════════════════════════════════════════════════════════════
-#  APP LAYOUT
+#  DATA SOURCE CONFIG
 # ════════════════════════════════════════════════════════════════
-
-st.title("Professional Spend Analytics")
-st.caption("Powered by DuckDB · Single-file · Local Browser")
-
-# Data source config
 with st.expander("Data Source Configuration", expanded=not Path(DATA_PATH).exists()):
     DATA_PATH = st.text_input(
         "File Path (parquet or CSV on shared drive)",
         value=DATA_PATH,
-        help="UNC path, e.g. \\\\server\\share\\file.parquet  or  C:\\data\\file.csv",
+        help=r"UNC path, e.g. \\server\share\file.parquet  or  C:\data\file.csv",
     )
 
-opts, err = load_filter_options(DATA_PATH)
+date_range, err = load_date_range(DATA_PATH)
 if err:
     st.error(err)
     st.stop()
 
+date_min, date_max = date_range
 
-# ── SIDEBAR ─────────────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════
+#  SIDEBAR — CASCADING FILTERS
+# ════════════════════════════════════════════════════════════════
 with st.sidebar:
     st.header("Filters")
 
-    sel_markets  = st.multiselect("Market",           options=opts["markets"],  placeholder="All")
-    sel_plans    = st.multiselect("Plan Type",         options=opts["plans"],    placeholder="All")
-    sel_entities = st.multiselect("Managing Entity",   options=opts["entities"], placeholder="All")
-    sel_pods     = st.multiselect("Pod",               options=opts["pods"],     placeholder="All")
-    sel_specs    = st.multiselect("Specialty",         options=opts["specs"],    placeholder="All")
+    # 1. Market — no upstream dependency
+    market_opts = get_distinct_filtered(DATA_PATH, C["market"], ())
+    sel_markets = st.multiselect("Market", options=market_opts, placeholder="All")
+
+    # 2. Plan Type — filtered by Market
+    plan_opts = get_distinct_filtered(
+        DATA_PATH, C["plan"],
+        ((C["market"], tuple(sel_markets)),)
+    )
+    sel_plans = st.multiselect("Plan Type", options=plan_opts, placeholder="All")
+
+    # 3. Managing Entity — filtered by Market + Plan
+    entity_opts = get_distinct_filtered(
+        DATA_PATH, C["entity"],
+        (
+            (C["market"], tuple(sel_markets)),
+            (C["plan"],   tuple(sel_plans)),
+        )
+    )
+    sel_entities = st.multiselect("Managing Entity", options=entity_opts, placeholder="All")
+
+    # 4. Pod — filtered by Market + Plan + Entity
+    pod_opts = get_distinct_filtered(
+        DATA_PATH, C["pod"],
+        (
+            (C["market"],  tuple(sel_markets)),
+            (C["plan"],    tuple(sel_plans)),
+            (C["entity"],  tuple(sel_entities)),
+        )
+    )
+    sel_pods = st.multiselect("Pod", options=pod_opts, placeholder="All")
+
+    # 5. Specialty — filtered by Market + Plan + Entity + Pod
+    spec_opts = get_distinct_filtered(
+        DATA_PATH, C["specialty"],
+        (
+            (C["market"],    tuple(sel_markets)),
+            (C["plan"],      tuple(sel_plans)),
+            (C["entity"],    tuple(sel_entities)),
+            (C["pod"],       tuple(sel_pods)),
+        )
+    )
+    sel_specs = st.multiselect("Specialty", options=spec_opts, placeholder="All")
 
     st.divider()
     st.markdown('<p class="section-label">Date Range</p>', unsafe_allow_html=True)
-    d_start = st.date_input("From", value=opts["date_min"],
-                             min_value=opts["date_min"], max_value=opts["date_max"])
-    d_end   = st.date_input("To",   value=opts["date_max"],
-                             min_value=opts["date_min"], max_value=opts["date_max"])
+    d_start = st.date_input("From", value=date_min, min_value=date_min, max_value=date_max)
+    d_end   = st.date_input("To",   value=date_max, min_value=date_min, max_value=date_max)
 
     st.divider()
     st.markdown('<p class="section-label">Scatter Granularity</p>', unsafe_allow_html=True)
-    gran_label = st.selectbox("Group By", list(GRANULARITY_OPTIONS.keys()))
-    gran_col   = GRANULARITY_OPTIONS[gran_label]
+    gran_keys    = list(GRANULARITY_OPTIONS.keys())
+    default_idx  = gran_keys.index(GRANULARITY_DEFAULT)
+    gran_label   = st.selectbox("Group By", gran_keys, index=default_idx)
+    gran_col     = GRANULARITY_OPTIONS[gran_label]
 
     st.markdown('<p class="section-label">Color Bubbles By</p>', unsafe_allow_html=True)
     color_by = st.radio("", ["Specialty", "Network Status"], horizontal=True,
@@ -328,7 +425,9 @@ with st.sidebar:
 wc = where_clause(sel_markets, sel_plans, sel_entities, sel_pods, sel_specs, d_start, d_end)
 
 
-# ── KPI ROW ─────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+#  KPI ROW
+# ════════════════════════════════════════════════════════════════
 kpi = get_kpis(DATA_PATH, wc).iloc[0]
 
 kpi_items = [
@@ -345,17 +444,19 @@ kpi_items = [
 cols = st.columns(6)
 for col, (label, value, extra_cls) in zip(cols, kpi_items):
     col.markdown(
-        f'''<div class="kpi-card {extra_cls}">
-               <div class="kpi-label">{label}</div>
-               <div class="kpi-value">{value}</div>
-           </div>''',
+        f'<div class="kpi-card {extra_cls}">'
+        f'<div class="kpi-label">{label}</div>'
+        f'<div class="kpi-value">{value}</div>'
+        f'</div>',
         unsafe_allow_html=True,
     )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
 
-# ── SCATTER PLOT ────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+#  SCATTER PLOT
+# ════════════════════════════════════════════════════════════════
 st.subheader(f"Cost Efficiency Scatter — Grouped by {gran_label}")
 st.caption(
     "X-axis: Avg Paid per Claim  |  Y-axis: Deviation from Benchmark (dataset mean)  |  "
@@ -410,33 +511,21 @@ else:
         paper_bgcolor="#ffffff",
         font=dict(color="#374151", family="Segoe UI, sans-serif", size=12),
         legend=dict(
-            orientation="v",
-            x=1.01,
+            orientation="v", x=1.01,
             bgcolor="rgba(255,255,255,0.9)",
-            bordercolor="#e5e7eb",
-            borderwidth=1,
+            bordercolor="#e5e7eb", borderwidth=1,
         ),
-        xaxis=dict(
-            showgrid=True,
-            gridcolor="#f3f4f6",
-            linecolor="#d1d5db",
-            zeroline=False,
-            title_font=dict(size=12, color="#374151"),
-        ),
-        yaxis=dict(
-            showgrid=True,
-            gridcolor="#f3f4f6",
-            linecolor="#d1d5db",
-            zeroline=False,
-            title_font=dict(size=12, color="#374151"),
-        ),
+        xaxis=dict(showgrid=True, gridcolor="#f3f4f6", linecolor="#d1d5db", zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor="#f3f4f6", linecolor="#d1d5db", zeroline=False),
         margin=dict(l=60, r=20, t=40, b=60),
     )
     st.plotly_chart(fig, use_container_width=True)
     st.caption(f"Showing top 500 {gran_label} groups by claim volume.")
 
 
-# ── DATA DOWNLOAD ───────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+#  DOWNLOAD
+# ════════════════════════════════════════════════════════════════
 st.divider()
 st.subheader("Download Filtered Data")
 
@@ -452,15 +541,13 @@ with dl_col3:
 if run_dl:
     dl_df = get_detail(DATA_PATH, wc, row_limit)
     st.info(f"{len(dl_df):,} rows ready for download.")
-
     if dl_fmt == "CSV":
         data_bytes = dl_df.to_csv(index=False).encode("utf-8")
         mime, fname = "text/csv", "professional_spend_filtered.csv"
     else:
         buf = io.BytesIO()
         dl_df.to_parquet(buf, index=False)
-        data_bytes = buf.getvalue()
-        mime, fname = "application/octet-stream", "professional_spend_filtered.parquet"
+        data_bytes, mime, fname = buf.getvalue(), "application/octet-stream", "professional_spend_filtered.parquet"
 
     st.download_button(
         f"Download {dl_fmt}  ({len(dl_df):,} rows)",
@@ -470,6 +557,8 @@ if run_dl:
     st.dataframe(dl_df.head(300), use_container_width=True, height=380)
 
 
-# ── FOOTER ──────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════
+#  FOOTER
+# ════════════════════════════════════════════════════════════════
 st.divider()
 st.caption("Professional Spend Analytics  |  DuckDB + Streamlit  |  Local Browser")
