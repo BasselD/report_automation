@@ -20,7 +20,8 @@ import io
 DATA_PATH = r"/Users/bassel_instructor/Documents/datasets/medicare_synthetic_12k.parquet"
 # Tip: also accepts CSV → DATA_PATH = r"\\shared_drive\...\file.csv"
 LOGO_PATH = r"logo.png"   # Set to your logo file path; supports PNG/JPG
-BANNER_COLOR = "rgb(0, 40, 80)"
+BANNER_COLOR        = "rgb(0, 40, 80)"
+GRANULARITY_DEFAULT = "Managing Entity"
 
 C = {
     "paid":      "TotalPaid",
@@ -40,7 +41,6 @@ C = {
     "date":      "DOSbegin",
     "pcp":       "PCPName",
     "provider":  "ProviderName",
-    "risk":      "RiskScore",
 }
 
 GRANULARITY_OPTIONS = {
@@ -52,7 +52,6 @@ GRANULARITY_OPTIONS = {
     "Provider":        C["provider"],
     "Procedure Code":  C["procedure"],
 }
-GRANULARITY_DEFAULT = "Managing Entity"
 
 # ══════════════════════════════════════════════════════════════════
 #  PAGE CONFIG
@@ -60,14 +59,15 @@ GRANULARITY_DEFAULT = "Managing Entity"
 st.set_page_config(
     page_title="Professional Spend Analytics",
     layout="wide",
-    #page_icon=":chart_with_upwards_trend:"
     initial_sidebar_state="expanded",
 )
 
 st.markdown("""
 <style>
     html, body, [class*="css"] { font-family: "Segoe UI", sans-serif; }
-    .block-container { padding-top: 0rem; padding-bottom: 2rem; }
+
+    /* Push content below Streamlit's fixed toolbar (~48px) */
+    .block-container { padding-top: 3.5rem !important; padding-bottom: 2rem; }
 
     /* Banner */
     .app-banner {
@@ -76,7 +76,7 @@ st.markdown("""
         justify-content: space-between;
         padding: 14px 28px;
         margin-bottom: 1.4rem;
-        border-radius: 0 0 6px 6px;
+        border-radius: 6px;
     }
     .banner-title {
         color: #ffffff;
@@ -86,17 +86,13 @@ st.markdown("""
         margin: 0;
     }
     .banner-subtitle {
-        color: rgba(255,255,255,0.65);
+        color: rgba(255,255,255,0.60);
         font-size: 0.78rem;
         margin: 3px 0 0;
-        font-weight: 400;
     }
-    .banner-logo {
-        height: 44px;
-        object-fit: contain;
-    }
+    .banner-logo { height: 44px; object-fit: contain; }
     .banner-logo-placeholder {
-        color: rgba(255,255,255,0.5);
+        color: rgba(255,255,255,0.4);
         font-size: 0.72rem;
         font-style: italic;
     }
@@ -132,6 +128,19 @@ st.markdown("""
         white-space: nowrap;
     }
 
+    /* Selection badge */
+    .selection-badge {
+        display: inline-block;
+        background-color: #eff6ff;
+        border: 1px solid #bfdbfe;
+        color: #1d4ed8;
+        border-radius: 6px;
+        padding: 6px 14px;
+        font-size: 0.82rem;
+        font-weight: 500;
+        margin-bottom: 10px;
+    }
+
     /* Sidebar */
     section[data-testid="stSidebar"] {
         background-color: #f9fafb;
@@ -150,9 +159,9 @@ st.markdown("""
 
 
 # ══════════════════════════════════════════════════════════════════
-#  BANNER WITH LOGO
+#  BANNER
 # ══════════════════════════════════════════════════════════════════
-def render_banner(title: str, subtitle: str, color: str, logo_path: str):
+def render_banner(title, subtitle, color, logo_path):
     if Path(logo_path).exists():
         with open(logo_path, "rb") as f:
             ext  = Path(logo_path).suffix.lower().replace(".", "")
@@ -162,21 +171,19 @@ def render_banner(title: str, subtitle: str, color: str, logo_path: str):
     else:
         logo_html = '<span class="banner-logo-placeholder">[ logo.png ]</span>'
 
-    st.markdown(f"""
-    <div class="app-banner" style="background-color:{color};">
-        <div>
-            <p class="banner-title">{title}</p>
-            <p class="banner-subtitle">{subtitle}</p>
-        </div>
-        {logo_html}
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="app-banner" style="background-color:{color};">'
+        f'<div><p class="banner-title">{title}</p>'
+        f'<p class="banner-subtitle">{subtitle}</p></div>'
+        f'{logo_html}</div>',
+        unsafe_allow_html=True,
+    )
 
 render_banner(
-    title    = "Professional Spend Analytics",
-    subtitle = "Powered by DuckDB  |  Local Browser",
-    color    = BANNER_COLOR,
-    logo_path= LOGO_PATH,
+    title     = "Professional Spend Analytics",
+    subtitle  = "Powered by DuckDB  |  Local Browser",
+    color     = BANNER_COLOR,
+    logo_path = LOGO_PATH,
 )
 
 
@@ -193,17 +200,12 @@ def read_expr(path: str) -> str:
 # ══════════════════════════════════════════════════════════════════
 @st.cache_data(ttl=300, show_spinner=False)
 def get_distinct_filtered(data_path: str, col: str, upstream: tuple) -> list:
-    """
-    Return distinct values for `col` constrained by upstream selections.
-    upstream = tuple of (column_name, selected_values_tuple) pairs
-    """
     expr  = read_expr(data_path)
-    parts = []
+    parts = [f"{col} IS NOT NULL"]
     for fc, fv in upstream:
         if fv:
             vals = ", ".join(f"'{v}'" for v in fv)
             parts.append(f"{fc} IN ({vals})")
-    parts.append(f"{col} IS NOT NULL")
     wc   = "WHERE " + " AND ".join(parts)
     rows = duckdb.execute(
         f"SELECT DISTINCT {col} FROM {expr} {wc} ORDER BY 1"
@@ -233,24 +235,27 @@ def load_date_range(data_path: str):
 # ══════════════════════════════════════════════════════════════════
 def where_clause(markets, plans, entities, pods, specs, d_start, d_end) -> str:
     parts = []
-    if markets:
-        vals = ", ".join(f"'{v}'" for v in markets)
-        parts.append(f"{C['market']} IN ({vals})")
-    if plans:
-        vals = ", ".join(f"'{v}'" for v in plans)
-        parts.append(f"{C['plan']} IN ({vals})")
-    if entities:
-        vals = ", ".join(f"'{v}'" for v in entities)
-        parts.append(f"{C['entity']} IN ({vals})")
-    if pods:
-        vals = ", ".join(f"'{v}'" for v in pods)
-        parts.append(f"{C['pod']} IN ({vals})")
-    if specs:
-        vals = ", ".join(f"'{v}'" for v in specs)
-        parts.append(f"{C['specialty']} IN ({vals})")
+    def add(col, vals):
+        if vals:
+            parts.append(f"{col} IN ({', '.join(f(v) for v in vals)})")
+    def f(v): return f"'{v}'"
+    add(C["market"],  markets)
+    add(C["plan"],    plans)
+    add(C["entity"],  entities)
+    add(C["pod"],     pods)
+    add(C["specialty"], specs)
     if d_start and d_end:
         parts.append(f"CAST({C['date']} AS DATE) BETWEEN '{d_start}' AND '{d_end}'")
     return ("WHERE " + " AND ".join(parts)) if parts else ""
+
+
+def append_dim_filter(base_wc: str, gran_col: str, selected_dims: list) -> str:
+    """Append a chart-selection dimension filter to an existing WHERE clause."""
+    if not selected_dims:
+        return base_wc
+    vals   = ", ".join(f"'{v}'" for v in selected_dims)
+    clause = f"{gran_col} IN ({vals})"
+    return (base_wc + f" AND {clause}") if base_wc else f"WHERE {clause}"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -270,8 +275,7 @@ def get_kpis(data_path: str, wc: str) -> pd.DataFrame:
             SUM(CASE WHEN {C['network']} = 'OON' THEN {C['paid']} ELSE 0 END)
             / NULLIF(SUM({C['paid']}), 0) * 100, 1
         )                                                               AS pct_oon
-    FROM {expr}
-    {wc}
+    FROM {expr} {wc}
     """
     return duckdb.execute(q).fetchdf()
 
@@ -283,12 +287,8 @@ def get_kpis(data_path: str, wc: str) -> pd.DataFrame:
 def get_scatter(data_path: str, wc: str, gran_col: str) -> pd.DataFrame:
     expr = read_expr(data_path)
     q = f"""
-    WITH filtered AS (
-        SELECT * FROM {expr} {wc}
-    ),
-    grand_avg AS (
-        SELECT AVG({C['paid']}) AS grand_mean FROM filtered
-    ),
+    WITH filtered AS (SELECT * FROM {expr} {wc}),
+    grand_avg AS (SELECT AVG({C['paid']}) AS grand_mean FROM filtered),
     grouped AS (
         SELECT
             {gran_col}                                                                    AS dimension,
@@ -296,16 +296,14 @@ def get_scatter(data_path: str, wc: str, gran_col: str) -> pd.DataFrame:
             COUNT({C['claim']})                                                           AS claim_count,
             ROUND(SUM({C['paid']}) / NULLIF(COUNT(DISTINCT {C['member']}), 0), 2)        AS paid_per_member,
             MODE({C['specialty']})                                                        AS specialty_mode,
-            MODE({C['network']})                                                          AS network_mode,
-            ROUND(AVG({C['risk']}), 3)                                                   AS avg_risk
+            MODE({C['network']})                                                          AS network_mode
         FROM filtered
         GROUP BY {gran_col}
         HAVING COUNT({C['claim']}) > 0
     )
     SELECT g.*, ROUND(g.avg_cost_per_claim - ga.grand_mean, 2) AS cost_deviation
     FROM grouped g CROSS JOIN grand_avg ga
-    ORDER BY g.claim_count DESC
-    LIMIT 500
+    ORDER BY g.claim_count DESC LIMIT 500
     """
     return duckdb.execute(q).fetchdf()
 
@@ -356,28 +354,21 @@ date_min, date_max = date_range
 with st.sidebar:
     st.header("Filters")
 
-    # 1. Market — no upstream dependency
     market_opts = get_distinct_filtered(DATA_PATH, C["market"], ())
     sel_markets = st.multiselect("Market", options=market_opts, placeholder="All")
 
-    # 2. Plan Type — filtered by Market
     plan_opts = get_distinct_filtered(
         DATA_PATH, C["plan"],
         ((C["market"], tuple(sel_markets)),)
     )
     sel_plans = st.multiselect("Plan Type", options=plan_opts, placeholder="All")
 
-    # 3. Managing Entity — filtered by Market + Plan
     entity_opts = get_distinct_filtered(
         DATA_PATH, C["entity"],
-        (
-            (C["market"], tuple(sel_markets)),
-            (C["plan"],   tuple(sel_plans)),
-        )
+        ((C["market"], tuple(sel_markets)), (C["plan"], tuple(sel_plans)))
     )
     sel_entities = st.multiselect("Managing Entity", options=entity_opts, placeholder="All")
 
-    # 4. Pod — filtered by Market + Plan + Entity
     pod_opts = get_distinct_filtered(
         DATA_PATH, C["pod"],
         (
@@ -388,14 +379,13 @@ with st.sidebar:
     )
     sel_pods = st.multiselect("Pod", options=pod_opts, placeholder="All")
 
-    # 5. Specialty — filtered by Market + Plan + Entity + Pod
     spec_opts = get_distinct_filtered(
         DATA_PATH, C["specialty"],
         (
-            (C["market"],    tuple(sel_markets)),
-            (C["plan"],      tuple(sel_plans)),
-            (C["entity"],    tuple(sel_entities)),
-            (C["pod"],       tuple(sel_pods)),
+            (C["market"],   tuple(sel_markets)),
+            (C["plan"],     tuple(sel_plans)),
+            (C["entity"],   tuple(sel_entities)),
+            (C["pod"],      tuple(sel_pods)),
         )
     )
     sel_specs = st.multiselect("Specialty", options=spec_opts, placeholder="All")
@@ -407,10 +397,10 @@ with st.sidebar:
 
     st.divider()
     st.markdown('<p class="section-label">Scatter Granularity</p>', unsafe_allow_html=True)
-    gran_keys    = list(GRANULARITY_OPTIONS.keys())
-    default_idx  = gran_keys.index(GRANULARITY_DEFAULT)
-    gran_label   = st.selectbox("Group By", gran_keys, index=default_idx)
-    gran_col     = GRANULARITY_OPTIONS[gran_label]
+    gran_keys   = list(GRANULARITY_OPTIONS.keys())
+    default_idx = gran_keys.index(GRANULARITY_DEFAULT)
+    gran_label  = st.selectbox("Group By", gran_keys, index=default_idx)
+    gran_col    = GRANULARITY_OPTIONS[gran_label]
 
     st.markdown('<p class="section-label">Color Bubbles By</p>', unsafe_allow_html=True)
     color_by = st.radio("", ["Specialty", "Network Status"], horizontal=True,
@@ -455,15 +445,16 @@ st.markdown("<br>", unsafe_allow_html=True)
 
 
 # ════════════════════════════════════════════════════════════════
-#  SCATTER PLOT
+#  SCATTER PLOT  (on_select → feeds download filter)
 # ════════════════════════════════════════════════════════════════
 st.subheader(f"Cost Efficiency Scatter — Grouped by {gran_label}")
 st.caption(
     "X-axis: Avg Paid per Claim  |  Y-axis: Deviation from Benchmark (dataset mean)  |  "
-    "Bubble size: Claim Volume  |  Dashed line = benchmark"
+    "Bubble size: Claim Volume  |  Click or lasso-select bubbles to filter the download below"
 )
 
 scatter_df = get_scatter(DATA_PATH, wc, gran_col)
+selected_dims = []   # will be populated from chart click/lasso events
 
 if scatter_df.empty:
     st.info("No data matches the current filters.")
@@ -477,14 +468,15 @@ else:
         y="cost_deviation",
         size="claim_count",
         color=color_col,
+        custom_data=["dimension"],        # ← dimension stored at customdata[0] for selection
         hover_name="dimension",
         hover_data={
             "avg_cost_per_claim": ":$,.2f",
             "cost_deviation":     ":$,.2f",
             "claim_count":        ":,",
             "paid_per_member":    ":$,.2f",
-            "avg_risk":           ":.3f",
             color_col:            True,
+            "dimension":          False,  # suppress duplicate; already in hover_name
         },
         labels={
             "avg_cost_per_claim": "Avg Paid per Claim ($)",
@@ -497,9 +489,7 @@ else:
         color_discrete_sequence=px.colors.qualitative.Safe,
     )
     fig.add_hline(
-        y=0,
-        line_dash="dot",
-        line_color="#9ca3af",
+        y=0, line_dash="dot", line_color="#9ca3af",
         annotation_text="Benchmark (dataset avg)",
         annotation_position="bottom right",
         annotation_font_color="#6b7280",
@@ -518,16 +508,65 @@ else:
         xaxis=dict(showgrid=True, gridcolor="#f3f4f6", linecolor="#d1d5db", zeroline=False),
         yaxis=dict(showgrid=True, gridcolor="#f3f4f6", linecolor="#d1d5db", zeroline=False),
         margin=dict(l=60, r=20, t=40, b=60),
+        # Enable box + lasso selection tools
+        dragmode="select",
+        newselection_mode="gradual",
     )
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_traces(
+        marker=dict(line=dict(width=0.8, color="#ffffff")),
+        unselected=dict(marker=dict(opacity=0.25)),
+    )
+
+    # Render chart — on_select triggers a rerun and returns event data
+    event = st.plotly_chart(
+        fig,
+        use_container_width=True,
+        on_select="rerun",
+        selection_mode=["points", "box", "lasso"],
+        key=f"scatter_{gran_label}_{color_by}",  # key resets selection on granularity change
+    )
+
+    # Extract selected dimension values from event
+    if event and event.selection and event.selection.points:
+        selected_dims = [
+            p["customdata"][0]
+            for p in event.selection.points
+            if p.get("customdata") and len(p["customdata"]) > 0
+        ]
+
     st.caption(f"Showing top 500 {gran_label} groups by claim volume.")
+
+# Show selection status badge
+if selected_dims:
+    st.markdown(
+        f'<div class="selection-badge">'
+        f'{len(selected_dims)} group(s) selected on chart — '
+        f'download below reflects this selection. '
+        f'Click empty chart area or reset filters to clear.'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 
 # ════════════════════════════════════════════════════════════════
-#  DOWNLOAD
+#  DOWNLOAD  (respects both sidebar filters + chart selection)
 # ════════════════════════════════════════════════════════════════
 st.divider()
 st.subheader("Download Filtered Data")
+
+# Build the effective WHERE clause: sidebar filters + chart selection (if any)
+download_wc = append_dim_filter(wc, gran_col, selected_dims)
+
+# Show active filter summary
+filter_parts = []
+if any([sel_markets, sel_plans, sel_entities, sel_pods, sel_specs]):
+    filter_parts.append("sidebar filters")
+if selected_dims:
+    filter_parts.append(f"{len(selected_dims)} chart-selected group(s)")
+if filter_parts:
+    st.caption(f"Active filters: {' + '.join(filter_parts)}")
+else:
+    st.caption("No filters active — full dataset will be returned.")
 
 dl_col1, dl_col2, dl_col3 = st.columns([3, 1, 1])
 with dl_col1:
@@ -539,7 +578,7 @@ with dl_col3:
     run_dl = st.button("Prepare Download", use_container_width=True)
 
 if run_dl:
-    dl_df = get_detail(DATA_PATH, wc, row_limit)
+    dl_df = get_detail(DATA_PATH, download_wc, row_limit)
     st.info(f"{len(dl_df):,} rows ready for download.")
     if dl_fmt == "CSV":
         data_bytes = dl_df.to_csv(index=False).encode("utf-8")
@@ -547,7 +586,8 @@ if run_dl:
     else:
         buf = io.BytesIO()
         dl_df.to_parquet(buf, index=False)
-        data_bytes, mime, fname = buf.getvalue(), "application/octet-stream", "professional_spend_filtered.parquet"
+        data_bytes = buf.getvalue()
+        mime, fname = "application/octet-stream", "professional_spend_filtered.parquet"
 
     st.download_button(
         f"Download {dl_fmt}  ({len(dl_df):,} rows)",
