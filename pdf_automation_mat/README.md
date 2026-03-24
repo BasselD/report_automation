@@ -111,12 +111,3 @@ Market_SubMarket_ManagingEntity_ReportingPod_PCPName_PCPNPI.pdf
 | 8              | ~5 min      |
 
 Reruns skip already-existing PDFs automatically.
-
-All 6 files are inside:
-
-- `main.py` — run this to generate all PDFs
-- `report_builder.py` — DataFrame → HTML mapper
-- `pdf_converter.py` — async Playwright batch engine
-- `templates/report.html` — visual layout
-- `requirements.txt` — dependencies
-- `README.md` — setup + SQL fixes needed
