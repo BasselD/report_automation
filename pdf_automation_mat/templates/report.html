@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; font-size: 11px; color: #1a1a1a; background: #fff; }
+
+  .report-header {
+    background: #1a3a5c; color: #fff;
+    padding: 10px 14px 8px;
+    display: flex; justify-content: space-between; align-items: flex-start;
+  }
+  .header-left h1 { font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+  .header-left .meta { font-size: 10px; opacity: .85; }
+  .header-right { display: flex; align-items: flex-start; gap: 10px; text-align: right; }
+  .header-right-text { font-size: 9px; line-height: 1.6; opacity: .92; }
+  .header-right-text .return-by { font-size: 10px; font-weight: 700; margin-bottom: 2px; }
+  .qr-code { width: 58px; height: 58px; object-fit: contain; border: 2px solid rgba(255,255,255,0.4); border-radius: 3px; }
+  .qr-placeholder { width: 58px; height: 58px; border: 2px solid rgba(255,255,255,0.4); border-radius: 3px; display: flex; align-items: center; justify-content: center; font-size: 7px; opacity: .6; text-align: center; line-height: 1.3; }
+
+  .metrics-bar { display: flex; flex-wrap: wrap; gap: 6px; background: #f0f4f8; padding: 7px 14px; border-bottom: 1px solid #cdd5df; align-items: center; }
+  .pill { background: #fff; border: 1px solid #b0bec5; border-radius: 4px; padding: 3px 8px; font-size: 10px; font-weight: 600; }
+  .pill span { color: #1a3a5c; font-size: 12px; }
+  .pill.goal { background: #1a3a5c; color: #fff; border-color: #1a3a5c; }
+  .legend { margin-left: auto; display: flex; gap: 8px; font-size: 9px; align-items: center; }
+  .legend-box { width: 12px; height: 12px; display: inline-block; vertical-align: middle; border: 1px solid #999; }
+
+  .priority-guide { display: flex; align-items: center; gap: 10px; padding: 5px 14px; font-size: 9px; background: #fafbfc; border-bottom: 1px solid #e0e6ed; }
+  .badge { display:inline-block; padding: 2px 6px; border-radius: 3px; font-weight: 700; font-size: 9px; color: #fff; }
+  .badge.high { background: #1a1a1a; }
+  .badge.med  { background: #555; }
+  .badge.low  { background: #888; }
+
+  .table-section { padding: 10px 14px 0; }
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; page-break-inside: auto; }
+  thead { display: table-header-group; }
+  tr    { page-break-inside: avoid; page-break-after: auto; }
+  th { background: #2c2c2c; color: #fff; font-size: 10px; font-weight: 600; padding: 5px 6px; text-align: left; border: 1px solid #444; }
+  td { padding: 5px 6px; vertical-align: top; border: 1px solid #d0d7de; font-size: 10px; }
+  tr:nth-child(even) td { background: #f7f9fb; }
+
+  col.c-tier    { width: 7%; }
+  col.c-patient { width: 15%; }
+  col.c-med     { width: 15%; }
+  col.c-status  { width: 14%; }
+  col.c-action  { width: 25%; }
+  col.c-history { width: 24%; }
+
+  .tier-cell { text-align: center; }
+  .tier-badge { display:inline-block; padding: 3px 6px; border-radius: 3px; font-weight: 700; font-size: 10px; color: #fff; margin-bottom: 2px; }
+  .tier-badge.HIGH { background: #1a1a1a; }
+  .tier-badge.MED  { background: #555; }
+  .tier-badge.LOW  { background: #888; }
+  .tier-label { font-size: 8px; color: #666; line-height: 1.3; }
+
+  .measure-tag { display:inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 700; color: #fff; margin-bottom: 3px; }
+  .tag-RASA { background: #1565c0; }
+  .tag-DIAB { background: #2e7d32; }
+  .tag-STAT { background: #6a1b9a; }
+
+  .pharmacy-name { font-size: 9px; color: #555; margin-top: 2px; line-height: 1.3; }
+
+  .pdc-value  { font-weight: 700; font-size: 12px; }
+  .pdc-high   { color: #1b5e20; }
+  .pdc-med    { color: #e65100; }
+  .pdc-low    { color: #b71c1c; }
+  .pdc-detail { font-size: 9px; color: #555; margin-top: 2px; line-height: 1.5; }
+  .recoverable-line { font-size: 9px; color: #1565c0; font-weight: 600; margin-top: 3px; }
+
+  .action-item { font-size: 9px; margin-bottom: 2px; }
+  .tier-driver { font-size: 8px; color: #666; font-style: italic; margin-top: 4px; border-top: 1px solid #e0e6ed; padding-top: 3px; }
+
+  .hist-row    { display: flex; align-items: center; margin-bottom: 3px; gap: 4px; }
+  .hist-year   { font-size: 9px; width: 28px; color: #555; }
+  .hist-bar-bg { flex: 1; background: #e0e0e0; height: 10px; border-radius: 2px; overflow: hidden; }
+  .hist-bar    { height: 100%; border-radius: 2px; }
+  .bar-80plus  { background: #1a1a1a; }
+  .bar-60to79  { background: #999; }
+  .bar-below60 { background: #ccc; }
+  .hist-pct    { font-size: 9px; font-weight: 600; width: 28px; text-align: right; }
+
+  @page { margin: 12mm 10mm; size: letter; }
+</style>
+</head>
+<body>
+
+<div class="report-header">
+  <div class="header-left">
+    <h1>Medication Adherence Target List</h1>
+    <div class="meta">
+      Reporting Pod: {{ reporting_pod }}
+      &nbsp;|&nbsp; PCP: {{ pcp_name }} ({{ pcp_npi }})
+      &nbsp;|&nbsp; Report Date: {{ report_date }}
+    </div>
+  </div>
+  <div class="header-right">
+    <div class="header-right-text">
+      <div class="return-by">Return report by {{ return_by_date }}</div>
+      <div>Email: {{ contact_email }}</div>
+      <div>Fax: {{ contact_fax }}</div>
+    </div>
+    {% if qr_code_path %}
+    <img class="qr-code" src="{{ qr_code_path }}" alt="QR Code"/>
+    {% else %}
+    <div class="qr-placeholder">QR<br/>CODE</div>
+    {% endif %}
+  </div>
+</div>
+
+<div class="metrics-bar">
+  <div class="pill">Patients <span>{{ total_patients }}</span></div>
+  <div class="pill">High <span>{{ high_count }}</span></div>
+  <div class="pill">Med <span>{{ med_count }}</span></div>
+  <div class="pill">Low <span>{{ low_count }}</span></div>
+  <div class="pill">Overdue <span>{{ overdue_count }}</span></div>
+  <div class="pill">Due ≤7d <span>{{ due_7d_count }}</span></div>
+  <div class="pill goal">Goal ≥80%</div>
+  <div class="legend">
+    <span><span class="legend-box" style="background:#1a1a1a;border-color:#1a1a1a;"></span> 80–100</span>
+    <span><span class="legend-box" style="background:#999;border-color:#999;"></span> 60–79</span>
+    <span><span class="legend-box" style="background:#ccc;"></span> 1–59</span>
+    <span><span class="legend-box"></span> missing</span>
+  </div>
+</div>
+
+<div class="priority-guide">
+  <strong>Priority Guide:</strong>
+  <span><span class="badge high">HIGH</span> = Call Today</span>
+  <span><span class="badge med">MED</span> = Call This Week</span>
+  <span><span class="badge low">LOW</span> = Monitor</span>
+</div>
+
+<div class="table-section">
+<table>
+  <colgroup>
+    <col class="c-tier"/><col class="c-patient"/><col class="c-med"/>
+    <col class="c-status"/><col class="c-action"/><col class="c-history"/>
+  </colgroup>
+  <thead>
+    <tr>
+      <th>Tier</th><th>Patient</th><th>Measure / Medication</th>
+      <th>Status</th><th>Recommended Action</th><th>Adherence History</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for row in patients %}
+  <tr>
+    <td class="tier-cell">
+      <div class="tier-badge {{ row.tier }}">{{ row.tier }}</div>
+      <div class="tier-label">{{ row.tier_label }}</div>
+    </td>
+    <td>
+      <strong>{{ row.member_name }} ({{ row.member_id }})</strong><br/>
+      DOB: {{ row.dob }}<br/>
+      Plan: {{ row.health_plan }}
+    </td>
+    <td>
+      <span class="measure-tag tag-{{ row.measure_tag }}">{{ row.measure_tag }}</span><br/>
+      <strong>{{ row.medication }}</strong>
+      <div class="pharmacy-name">
+        {{ row.pharmacy }}{% if row.pharmacy_npi %} (NPI: {{ row.pharmacy_npi }}){% endif %}
+      </div>
+    </td>
+    <td>
+      <span class="pdc-value {{ row.pdc_class }}">PDC: {{ row.pdc_pct }}%</span>
+      &nbsp;| Fills: {{ row.fill_count }}<br/>
+      <div class="pdc-detail">
+        {% if row.days_late > 0 %}Late: {{ row.days_late }}d{% if row.due_date != '—' %} | {% endif %}{% endif %}
+        {% if row.due_date != '—' %}Due: {{ row.due_date }}{% endif %}
+      </div>
+      {% if row.recoverable_days is not none %}
+      <div class="recoverable-line">
+        {% if row.recoverable_days > 0 %}Recoverable in {{ row.recoverable_days }}d
+        {% else %}⚠ Unrecoverable this year{% endif %}
+      </div>
+      {% endif %}
+    </td>
+    <td>
+      {% if row.action1 %}<div class="action-item">• {{ row.action1 }}</div>{% endif %}
+      {% if row.action2 %}<div class="action-item">• {{ row.action2 }}</div>{% endif %}
+      {% if row.tier_driver %}<div class="tier-driver">Tier driver: {{ row.tier_driver }}</div>{% endif %}
+    </td>
+    <td>
+      {% for h in row.history %}
+      <div class="hist-row">
+        <span class="hist-year">{{ h.year }}</span>
+        <div class="hist-bar-bg">
+          {% if h.pct is not none %}<div class="hist-bar {{ h.bar_class }}" style="width:{{ h.pct }}%;"></div>{% endif %}
+        </div>
+        <span class="hist-pct">{% if h.pct is not none %}{{ h.pct }}%{% else %}—{% endif %}</span>
+      </div>
+      {% endfor %}
+    </td>
+  </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+</body>
+</html>
