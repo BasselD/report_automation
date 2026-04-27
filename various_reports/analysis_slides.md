@@ -660,3 +660,204 @@ Example:
 
 If you want, I can turn this into a **fully polished PowerPoint-ready content outline with exact slide body text placement and callout wording** next.
 
+---
+Not enough yet. The current structure captures the **analysis flow**, but it does **not explicitly surface several of Dr. T’s own interpretations** strongly enough.
+
+Right now the deck is more:
+
+* here is the framework
+* here are the visuals
+* here is how to read them
+
+What Dr. T added in the meeting were actual **business findings and implications**, and those should absolutely be reflected in the slide wording and callouts.
+
+## The main findings from Dr. T that should be brought into the deck
+
+### 1. Harlingen confirmed his prior suspicion
+
+He explicitly said the Harlingen result:
+
+* **proved what he already suspected**
+* Catalyst is getting more of the business
+* likely due to **steerage from the emergency room**
+
+That is stronger than the current wording.
+Your Harlingen slide should say that directly.
+
+### 2. Most hospitals appear to have a dominant group
+
+He called out that:
+
+* Knapp is essentially all Catalyst
+* Valley Regional is predominantly H&I
+* Valley Baptist Brownsville is predominantly Femi
+* Harlingen is the one with the more meaningful head-to-head split
+
+That is an important finding and should be stated on the market share slide.
+
+### 3. High provider-level observation rates are often just low-volume aberrations
+
+He clearly said:
+
+* 83%, 78%, 85% type values should mostly be discounted when low volume
+* the more meaningful read is from the **larger-volume providers** and especially **group-level results**
+
+Your reliability slide touches this, but it should be sharper and explicitly tied to his interpretation.
+
+### 4. A practical observation benchmark exists
+
+He anchored around:
+
+* roughly **33% to 35%** as a working benchmark
+* some lower values like Catalyst’s group rates looked notably low
+* some very high values were not operationally believable
+
+That benchmark should appear on the heatmap slide or in the callout.
+
+### 5. The analysis is already operationally useful
+
+He said this was:
+
+* **huge data for me**
+* **terribly useful**
+* it tells him **who’s driving the ship**
+* it helps him know whether he needs to push hospitals on preferred provider routing
+
+That should show up on the closing slide, or even the executive summary.
+
+### 6. The methodology is accepted, even if imperfect
+
+He acknowledged:
+
+* the output looks simple
+* the work behind it clearly was not
+* the report is still useful despite the auth/claims messiness
+
+That means the methods slide should not sound defensive. It should sound like:
+
+* practical
+* accepted
+* decision-useful
+
+## What I would change in the slide structure
+
+## Slide 1. Executive summary
+
+Yes, this slide should explicitly mention Dr. T’s findings.
+
+### Replace the current bullets with something closer to:
+
+* Most major facilities show a dominant hospitalist group pattern rather than a balanced distribution of volume.
+* Harlingen Medical Center confirms the clearest competitive split, with Catalyst leading the bundled Beyond and Benchmark view.
+* Very high provider-level observation rates are largely driven by low-volume outliers and should not be interpreted as stable practice patterns.
+* Group-level observation rates are more credible for operational review, with approximately one-third remaining a practical benchmark range.
+* The analysis is now useful for hospital routing discussions and preferred-provider strategy.
+
+That is much closer to what he actually said.
+
+---
+
+## Slide 3. Share of business by facility
+
+The structure is right, but the observation box should reflect his facility-specific interpretations.
+
+### Better callout wording:
+
+**Dr. T’s interpretation**
+
+* Most facilities appear to be predominantly served by one primary hospitalist group.
+* Harlingen is the clearest head-to-head comparison and confirms a meaningful split between Catalyst and Beyond plus Benchmark.
+* These patterns support the view that hospital-level routing is concentrated and operationally important.
+
+That is stronger than generic language.
+
+---
+
+## Slide 4. Harlingen focus
+
+This is the slide where his interpretation should be the loudest.
+
+### Better right-side panel:
+
+**Business implication**
+
+* Catalyst currently holds the larger share of identified hospitalized volume at Harlingen.
+* This confirms the prior concern that admissions may be preferentially routed rather than evenly distributed.
+* Harlingen should remain the primary facility for monitoring preferred-provider alignment over time.
+
+That reflects exactly what he said.
+
+---
+
+## Slide 5. Observation rate heatmap
+
+Yes, but it should explicitly include his benchmark logic.
+
+### Add this callout:
+
+**Interpretation guidance**
+
+* Rates near one-third remain a practical operating benchmark.
+* Very high percentages should be discounted when driven by low volume.
+* Larger-volume group patterns are more meaningful than isolated provider-level extremes.
+
+That is basically Dr. T’s verbal interpretation translated into executive language.
+
+---
+
+## Slide 6. Provider drilldown with reliability
+
+This one already moves in the right direction, but it should tie more directly to what he said.
+
+### Better takeaway strip:
+
+**Most extreme provider-level observation rates appear to be low-volume aberrations, while reliable-volume providers provide the more decision-useful signal.**
+
+That is much closer to the transcript.
+
+---
+
+## Slide 8. Implications and next steps
+
+This should explicitly capture the “who’s driving the ship” point.
+
+### Add under Immediate implications:
+
+* The report now provides a practical view of which hospitalist groups are driving volume at each major facility.
+* The output is strong enough to support hospital conversations around preferred provider routing and group utilization patterns.
+
+That closes the loop with his reaction.
+
+## So, blunt answer
+
+### Are the findings from Dr. T currently reflected?
+
+**Partially, but not strongly enough.**
+
+### Is the structure still good?
+
+**Yes.** The structure is fine.
+
+### What is missing?
+
+The **callout language, executive bullets, and slide takeaways** need to reflect:
+
+* his interpretations
+* his benchmark logic
+* his operational conclusions
+* his positive reaction to the usefulness of the report
+
+Right now the structure is analytically correct, but it is a little too neutral.
+You need to bake in his key reactions so the deck reads like:
+
+> here is what the data shows, and here is what Dr. T concluded from it
+
+not just:
+
+> here are some visuals
+
+## My recommendation
+
+Revise the wording on Slides **1, 3, 4, 5, 6, and 8** to explicitly incorporate his findings.
+
+
