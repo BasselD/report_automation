@@ -1195,372 +1195,136 @@ That gives you clean encounter analytics **and** clean readmission aggregation.
 
 ---
 
-# Practical SQL Pattern
+Yes, but **do not mix observation into the official readmission numerator unless the business definition says to**.
 
-## Step 1. Add month fields to your IP stay table
+Best structure:
 
-In your final IP table, add:
+| Metric                                 |       Denominator |                                   Numerator | Use                             |
+| -------------------------------------- | ----------------: | ------------------------------------------: | ------------------------------- |
+| **Acute 30-Day Readmission**           | Acute index stays |  Next qualifying acute admit within 30 days | Main readmission metric         |
+| **Observation Return Within 30 Days**  | Acute index stays |               Next OBS event within 30 days | Utilization / leakage signal    |
+| **Acute or OBS Return Within 30 Days** | Acute index stays |      Next acute or OBS event within 30 days | Broader avoidable-return metric |
+| **OBS-to-Acute Escalation**            |   OBS index stays | Acute admit within 0-3 days or same episode | Conversion / escalation metric  |
+
+## My recommendation
+
+Keep these as **separate flags** on the event-level table:
+
+```text
+ReadmitDenominator
+AcuteReadmitNumerator
+ObsReturnNumerator
+AcuteOrObsReturnNumerator
+ObsToAcuteEscalationFlag
+```
+
+Then in Tableau / Excel / Python, you can calculate:
+
+```text
+Acute Readmission Rate =
+SUM(AcuteReadmitNumerator) / SUM(ReadmitDenominator)
+
+OBS Return Rate =
+SUM(ObsReturnNumerator) / SUM(ReadmitDenominator)
+
+Acute or OBS Return Rate =
+SUM(AcuteOrObsReturnNumerator) / SUM(ReadmitDenominator)
+```
+
+This gives you flexibility without contaminating the main readmission metric. Otherwise, someone will ask why your readmission rate does not match the enterprise/CMS-style number, and then the dashboard starts sweating.
+
+---
+
+# Suggested logic
+
+## 1. Acute index stay denominator
+
+Use only **acute authorization events** as the readmission denominator.
 
 ```sql
-CAST((EXTRACT(YEAR FROM IP.Admit) * 100 + EXTRACT(MONTH FROM IP.Admit)) AS INTEGER) AS AdmitYYYYMM,
-CAST((EXTRACT(YEAR FROM IP.Discharge) * 100 + EXTRACT(MONTH FROM IP.Discharge)) AS INTEGER) AS DischargeYYYYMM,
-TRUNC(IP.Admit, 'MON') AS AdmitMonth,
-TRUNC(IP.Discharge, 'MON') AS DischargeMonth
+CASE 
+    WHEN BedType = 'Acute' THEN 1 
+    ELSE 0 
+END AS ReadmitDenominator
 ```
 
-For readmission attribution, I would use **DischargeMonth** unless your readmission summary documentation says otherwise.
+## 2. Acute readmission numerator
 
----
-
-## Step 2. Create monthly readmission fact table
+Next qualifying **acute** admit after discharge.
 
 ```sql
-CREATE VOLATILE TABLE vt_readmission_monthly AS
-(
-    SELECT
-        MemberID,
-        ReportBeginDate,
-        ReportEndDate,
-        TRUNC(ReportBeginDate, 'MON') AS ReportMonth,
-
-        SUM(Auth_Readmits) AS ReadmitNumerator,
-        SUM(Auth_ReadmitsDenominator) AS ReadmitDenominator
-
-    FROM BISDM_CA_BASE_PRD.MSO_Core_Utilization_Summary
-    CROSS JOIN vt_dates D
-
-    WHERE ReportBeginDate >= D.StartDate
-      AND OperationalMarket = 'TX'
-      AND CareAlliesManagedFlag = 1
-      AND Auth_Readmits IS NOT NULL
-
-    GROUP BY
-        MemberID,
-        ReportBeginDate,
-        ReportEndDate,
-        TRUNC(ReportBeginDate, 'MON')
-) WITH DATA
-ON COMMIT PRESERVE ROWS;
-
-COLLECT STATISTICS COLUMN (MemberID, ReportMonth) ON vt_readmission_monthly;
+CASE
+    WHEN BedType = 'Acute'
+     AND NextAcuteAdmit IS NOT NULL
+     AND NextAcuteAdmit - Discharge > 2
+     AND NextAcuteAdmit - Discharge <= 30
+    THEN 1
+    ELSE 0
+END AS AcuteReadmitNumerator
 ```
 
----
+## 3. Observation return numerator
 
-## Step 3. Create candidate index admissions
-
-This table assigns each member-month to one encounter.
+Next **OBS** event after discharge.
 
 ```sql
-CREATE VOLATILE TABLE vt_readmission_attribution_bridge AS
-(
-    SELECT
-        RM.MemberID,
-        RM.ReportMonth,
-        RM.ReportBeginDate,
-        RM.ReportEndDate,
-        RM.ReadmitNumerator,
-        RM.ReadmitDenominator,
-
-        IP.AuthznKey,
-        IP.Admit,
-        IP.Discharge,
-        IP.DischargeMonth,
-
-        IP.BedType,
-        IP.AdmittingFacilityNameGroup,
-        IP.AttendingProviderNPI,
-        IP.AttendingProviderName,
-        IP.AttendingProviderTIN,
-        IP.AttendingProviderHospitalGroupName_VOP,
-
-        ROW_NUMBER() OVER (
-            PARTITION BY RM.MemberID, RM.ReportMonth
-            ORDER BY 
-                IP.Discharge ASC,
-                IP.Admit ASC,
-                IP.AuthznKey
-        ) AS AttributionRank
-
-    FROM vt_readmission_monthly RM
-
-    INNER JOIN vt_final IP
-        ON RM.MemberID = IP.MemberID
-       AND RM.ReportMonth = IP.DischargeMonth
-       AND IP.BedType IN ('Acute', 'OBS')
-) WITH DATA
-ON COMMIT PRESERVE ROWS;
+CASE
+    WHEN BedType = 'Acute'
+     AND NextObsAdmit IS NOT NULL
+     AND NextObsAdmit - Discharge > 2
+     AND NextObsAdmit - Discharge <= 30
+    THEN 1
+    ELSE 0
+END AS ObsReturnNumerator
 ```
 
-Then keep one row per member-month:
+## 4. Acute or OBS return numerator
+
+Use the earliest next acute or observation event.
 
 ```sql
-CREATE VOLATILE TABLE vt_readmission_attributed AS
-(
-    SELECT *
-    FROM vt_readmission_attribution_bridge
-    WHERE AttributionRank = 1
-) WITH DATA
-ON COMMIT PRESERVE ROWS;
-
-COLLECT STATISTICS COLUMN (AuthznKey) ON vt_readmission_attributed;
-COLLECT STATISTICS COLUMN (MemberID, ReportMonth) ON vt_readmission_attributed;
-COLLECT STATISTICS COLUMN (AttendingProviderNPI) ON vt_readmission_attributed;
+CASE
+    WHEN BedType = 'Acute'
+     AND NextAcuteOrObsAdmit IS NOT NULL
+     AND NextAcuteOrObsAdmit - Discharge > 2
+     AND NextAcuteOrObsAdmit - Discharge <= 30
+    THEN 1
+    ELSE 0
+END AS AcuteOrObsReturnNumerator
 ```
 
----
+## 5. OBS-to-Acute escalation
 
-# Better attribution rule
-
-Instead of blindly taking first discharge in the month, add denominator logic:
+This is separate. It answers whether an observation event turned into or was followed by an acute admission.
 
 ```sql
-WHERE RM.ReadmitDenominator = 1
-```
-
-This helps avoid assigning readmission metrics when there is no eligible index admission.
-
-Recommended version:
-
-```sql
-CREATE VOLATILE TABLE vt_readmission_attributed AS
-(
-    SELECT *
-    FROM vt_readmission_attribution_bridge
-    WHERE AttributionRank = 1
-      AND ReadmitDenominator > 0
-) WITH DATA
-ON COMMIT PRESERVE ROWS;
+CASE
+    WHEN BedType = 'OBS'
+     AND NextAcuteAdmit IS NOT NULL
+     AND NextAcuteAdmit - Admit BETWEEN 0 AND 3
+    THEN 1
+    ELSE 0
+END AS ObsToAcuteEscalationFlag
 ```
 
 ---
 
-# How to use this in Tableau / Excel
+# Final design recommendation
 
-## Option 1. Preferred: separate tables with relationships
-
-In Tableau, use:
-
-### Table 1: `fact_ip_stay`
-
-Grain:
+Add observation logic, but label it clearly:
 
 ```text
-AuthznKey
+AcuteReadmitNumerator
+ObsReturnNumerator
+AcuteOrObsReturnNumerator
+ObsToAcuteEscalationFlag
 ```
 
-### Table 2: `fact_readmission_attributed`
-
-Grain:
+Do **not** rename the combined acute/OBS metric as “readmission” unless leadership agrees. I would call it:
 
 ```text
-MemberID + ReportMonth + AuthznKey
+30-Day Acute or OBS Return Rate
 ```
 
-Join / relationship on:
+That is cleaner, defensible, and much easier to explain.
 
-```text
-AuthznKey
-```
-
-This allows Tableau to aggregate:
-
-```text
-SUM(ReadmitNumerator) / SUM(ReadmitDenominator)
-```
-
-by:
-
-* facility
-* attending provider
-* hospitalist group
-* month
-* market
-* pod
-* managing entity
-
-without duplicating the readmission metric across multiple stays.
-
----
-
-## Option 2. Create a reporting-ready monthly provider table
-
-For Excel pivots, this may be easier.
-
-Create a summarized table at the grain users actually need:
-
-```text
-Month + Hospital + AttendingProviderNPI + HospitalistGroup
-```
-
-Example:
-
-```sql
-CREATE VOLATILE TABLE vt_provider_hospital_monthly_summary AS
-(
-    SELECT
-        IP.DischargeMonth AS ReportMonth,
-
-        IP.AdmittingFacilityNameGroup,
-        IP.AttendingProviderNPI,
-        IP.AttendingProviderName,
-        IP.AttendingProviderTIN,
-        IP.AttendingProviderHospitalGroupName_VOP,
-        IP.AttendingProviderVolumeTier,
-
-        COUNT(DISTINCT IP.AuthznKey) AS StayCount,
-        SUM(CASE WHEN IP.BedType = 'OBS' THEN 1 ELSE 0 END) AS ObsStayCount,
-        AVG(IP.LengthOfStay) AS AvgLengthOfStay,
-
-        SUM(CASE WHEN IP.Discharge_Disposition_Group = 'SNF/Rehab' THEN 1 ELSE 0 END) AS SNFRehabDischargeCount,
-        SUM(CASE WHEN IP.Discharge_Disposition_Group = 'Home Health' THEN 1 ELSE 0 END) AS HomeHealthDischargeCount,
-
-        SUM(COALESCE(RA.ReadmitNumerator, 0)) AS ReadmitNumerator,
-        SUM(COALESCE(RA.ReadmitDenominator, 0)) AS ReadmitDenominator,
-
-        CASE
-            WHEN SUM(COALESCE(RA.ReadmitDenominator, 0)) > 0
-            THEN 
-                CAST(SUM(COALESCE(RA.ReadmitNumerator, 0)) AS DECIMAL(18,4))
-                / NULLIFZERO(SUM(COALESCE(RA.ReadmitDenominator, 0)))
-            ELSE NULL
-        END AS ReadmissionRate
-
-    FROM vt_final IP
-
-    LEFT JOIN vt_readmission_attributed RA
-        ON IP.AuthznKey = RA.AuthznKey
-
-    GROUP BY
-        IP.DischargeMonth,
-        IP.AdmittingFacilityNameGroup,
-        IP.AttendingProviderNPI,
-        IP.AttendingProviderName,
-        IP.AttendingProviderTIN,
-        IP.AttendingProviderHospitalGroupName_VOP,
-        IP.AttendingProviderVolumeTier
-) WITH DATA
-ON COMMIT PRESERVE ROWS;
-```
-
-This is probably the best table for:
-
-* Excel pivot users
-* Tableau extracts
-* Python charts
-* executive summaries
-
----
-
-# Important: Do not average rates
-
-For readmissions, do **not** calculate:
-
-```text
-AVG(ReadmissionRate)
-```
-
-That will be wrong.
-
-Always calculate:
-
-```text
-SUM(ReadmitNumerator) / SUM(ReadmitDenominator)
-```
-
-This is the golden rule. Put it on a Post-it. Possibly tattoo it on the dashboard.
-
----
-
-# Recommended Final Data Model
-
-## 1. Encounter-level table
-
-```text
-fact_ip_stay
-```
-
-Use for:
-
-* stay count
-* LOS
-* observation indicator
-* discharge disposition
-* provider attribution
-* facility mapping
-* active member flag
-* provider volume tier
-
----
-
-## 2. Readmission monthly source table
-
-```text
-fact_readmission_monthly
-```
-
-Use for:
-
-* validating readmission source values
-* monthly audit
-* member-month numerator/denominator
-
----
-
-## 3. Readmission attribution bridge
-
-```text
-bridge_readmission_attribution
-```
-
-Use for:
-
-* assigning readmission numerator/denominator to the most appropriate stay
-* avoiding duplication
-* hospital/provider/group reporting
-
----
-
-## 4. Aggregated reporting table
-
-```text
-mart_provider_hospital_monthly
-```
-
-Use for:
-
-* Tableau dashboard
-* Excel pivot
-* Python trend charts
-* provider comparison
-* hospitalist group analysis
-
----
-
-# Suggested table grains
-
-| Table                            | Grain                                                     | Key                                                     |
-| -------------------------------- | --------------------------------------------------------- | ------------------------------------------------------- |
-| `fact_ip_stay`                   | One row per stay                                          | `AuthznKey`                                             |
-| `fact_readmission_monthly`       | One row per member-month                                  | `MemberID + ReportMonth`                                |
-| `bridge_readmission_attribution` | One row per readmission member-month assigned to one stay | `MemberID + ReportMonth + AuthznKey`                    |
-| `mart_provider_hospital_monthly` | One row per month-provider-hospital-group                 | `ReportMonth + FacilityGroup + ProviderNPI + GroupName` |
-
----
-
-# Final Recommendation
-
-Yes, create a **separate readmission table**.
-
-Do **not** directly join monthly readmission numerator/denominator to every IP stay and call it done. That is how metric inflation sneaks in wearing a fake mustache.
-
-The cleanest approach is:
-
-```text
-1. Keep the encounter table clean at one row per stay.
-2. Keep readmissions separate at their source grain.
-3. Build a readmission attribution bridge.
-4. Build a final monthly summary mart for Tableau, Excel, and Python.
-```
-
-This gives you flexibility, prevents denominator duplication, and lets you aggregate safely by hospital, attending provider, and group.
