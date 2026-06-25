@@ -63,3 +63,9 @@ Before ending, confirm:
 Key Line
 
 I’m not trying to reduce support. I’m trying to make sure our support is targeted, nonduplicative, and connected to a clear business action.
+
+* What specific product, report, dataset, or workflow he expects
+* What decision it will support
+* Who will use it
+* What action should occur because of it
+* What “finished” looks like
