@@ -596,3 +596,249 @@ This gives you a defensible way to answer:
 * Is the apparent difference due to data latency or true missing events?
 
 For production QA, I would use **exact admit date as the primary match**, ±1 day only as the documented fallback, and report both separately.
+
+---
+# lag calc
+That helps a lot. With message_type, you can calculate the lag correctly by event type instead of treating every ADT row the same.
+
+Recommended interpretation
+
+* A01 usually represents an inpatient admission
+* A02 usually represents a transfer
+* A03 usually represents discharge
+* A08 usually represents an update to patient or visit information
+
+So:
+
+* For admission notification lag, use A01
+* For discharge notification lag, use A03
+* For pipeline ingestion lag, use all message types
+* Treat A08 separately as an update-lag metric, not as an admission or discharge notification
+
+Add event-specific lag fields
+
+import pandas as pd
+import numpy as np
+adt = df_adt.copy()
+datetime_columns = [
+    "admit_date",
+    "discharge_date",
+    "message_timestamp",
+    "insert_timestamp",
+]
+for column in datetime_columns:
+    adt[column] = pd.to_datetime(
+        adt[column],
+        errors="coerce"
+    )
+adt["message_type"] = (
+    adt["message_type"]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+)
+
+Pipeline ingestion lag
+
+This works for every ADT message:
+
+adt["ingestion_lag_hours"] = (
+    adt["insert_timestamp"]
+    - adt["message_timestamp"]
+).dt.total_seconds() / 3600
+
+Admission notification lag
+
+adt["admission_notification_lag_hours"] = np.where(
+    adt["message_type"].eq("A01"),
+    (
+        adt["message_timestamp"]
+        - adt["admit_date"]
+    ).dt.total_seconds() / 3600,
+    np.nan
+)
+
+Discharge notification lag
+
+adt["discharge_notification_lag_hours"] = np.where(
+    adt["message_type"].eq("A03"),
+    (
+        adt["message_timestamp"]
+        - adt["discharge_date"]
+    ).dt.total_seconds() / 3600,
+    np.nan
+)
+
+Update lag
+
+For A08, it is safer to measure only pipeline ingestion unless you have a separate event-effective timestamp.
+
+adt["update_ingestion_lag_hours"] = np.where(
+    adt["message_type"].eq("A08"),
+    adt["ingestion_lag_hours"],
+    np.nan
+)
+
+Better encounter-level ADT summary
+
+Because each hospitalization can have multiple ADT messages, build one row per member and admission event.
+
+adt_event_summary = (
+    adt
+    .groupby(
+        ["memberno", "admit_date"],
+        dropna=False
+    )
+    .agg(
+        adt_discharge=("discharge_date", "max"),
+        first_message_timestamp=(
+            "message_timestamp",
+            "min"
+        ),
+        latest_message_timestamp=(
+            "message_timestamp",
+            "max"
+        ),
+        first_insert_timestamp=(
+            "insert_timestamp",
+            "min"
+        ),
+        latest_insert_timestamp=(
+            "insert_timestamp",
+            "max"
+        ),
+        first_a01_message_timestamp=(
+            "message_timestamp",
+            lambda x: x[
+                adt.loc[x.index, "message_type"].eq("A01")
+            ].min()
+        ),
+        first_a03_message_timestamp=(
+            "message_timestamp",
+            lambda x: x[
+                adt.loc[x.index, "message_type"].eq("A03")
+            ].min()
+        ),
+        first_a01_insert_timestamp=(
+            "insert_timestamp",
+            lambda x: x[
+                adt.loc[x.index, "message_type"].eq("A01")
+            ].min()
+        ),
+        first_a03_insert_timestamp=(
+            "insert_timestamp",
+            lambda x: x[
+                adt.loc[x.index, "message_type"].eq("A03")
+            ].min()
+        ),
+        a01_count=(
+            "message_type",
+            lambda x: x.eq("A01").sum()
+        ),
+        a03_count=(
+            "message_type",
+            lambda x: x.eq("A03").sum()
+        ),
+        a08_count=(
+            "message_type",
+            lambda x: x.eq("A08").sum()
+        ),
+    )
+    .reset_index()
+)
+
+Then calculate the real encounter-level lags:
+
+adt_event_summary["admission_message_lag_hours"] = (
+    adt_event_summary["first_a01_message_timestamp"]
+    - adt_event_summary["admit_date"]
+).dt.total_seconds() / 3600
+adt_event_summary["admission_available_lag_hours"] = (
+    adt_event_summary["first_a01_insert_timestamp"]
+    - adt_event_summary["admit_date"]
+).dt.total_seconds() / 3600
+adt_event_summary["discharge_message_lag_hours"] = (
+    adt_event_summary["first_a03_message_timestamp"]
+    - adt_event_summary["adt_discharge"]
+).dt.total_seconds() / 3600
+adt_event_summary["discharge_available_lag_hours"] = (
+    adt_event_summary["first_a03_insert_timestamp"]
+    - adt_event_summary["adt_discharge"]
+).dt.total_seconds() / 3600
+
+Add ADT completeness flags
+
+adt_event_summary["has_a01_flag"] = (
+    adt_event_summary["a01_count"] > 0
+).astype(int)
+adt_event_summary["has_a03_flag"] = (
+    adt_event_summary["a03_count"] > 0
+).astype(int)
+adt_event_summary["complete_adt_sequence_flag"] = (
+    adt_event_summary["has_a01_flag"].eq(1)
+    & adt_event_summary["has_a03_flag"].eq(1)
+).astype(int)
+
+Join this back to your claims comparison
+
+final_adt_reconciliation = (
+    final_adt_reconciliation
+    .drop(
+        columns=[
+            column
+            for column in adt_event_summary.columns
+            if column in final_adt_reconciliation.columns
+            and column not in ["member_id", "claim_admit"]
+        ],
+        errors="ignore"
+    )
+    .merge(
+        adt_event_summary.rename(
+            columns={
+                "memberno": "member_id",
+                "admit_date": "adt_admit",
+            }
+        ),
+        on=["member_id", "adt_admit"],
+        how="left"
+    )
+)
+
+Best headline measures
+
+For the QA view, report:
+
+ADT coverage rate
+A01 availability rate
+A03 availability rate
+Complete A01 + A03 sequence rate
+Median admission availability lag
+P90 admission availability lag
+Median discharge availability lag
+P90 discharge availability lag
+Median ingestion lag by message type
+
+And summarize by message_type:
+
+message_type_lag_summary = (
+    adt
+    .groupby("message_type")
+    .agg(
+        message_count=("message_type", "size"),
+        median_ingestion_lag_hours=(
+            "ingestion_lag_hours",
+            "median"
+        ),
+        p90_ingestion_lag_hours=(
+            "ingestion_lag_hours",
+            lambda x: x.quantile(0.90)
+        ),
+        p95_ingestion_lag_hours=(
+            "ingestion_lag_hours",
+            lambda x: x.quantile(0.95)
+        ),
+    )
+    .reset_index()
+)
+
+This is much more defensible than calculating one generic lag from the latest retained ADT row. A08 updates can otherwise make the data look late even when the original admission or discharge notification arrived on time.
