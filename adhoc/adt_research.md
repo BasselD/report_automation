@@ -1735,3 +1735,277 @@ The SQL above instead keeps:
 * First and last A08
 
 This preserves discharge timeliness and patient event sequencing while still reducing the ADT volume substantially.
+
+```sql
+DROP TABLE IF EXISTS tmp_hie_events;
+
+CREATE TEMP TABLE tmp_hie_events
+DISTSTYLE KEY
+DISTKEY (member_id)
+SORTKEY (member_id, adt_admit_date)
+AS
+
+WITH event_metrics AS
+(
+    SELECT
+        h.member_id,
+        h.adt_admit_date,
+
+        MIN(h.adt_admit_ts) AS adt_admit_ts,
+
+        MAX(
+            CASE
+                WHEN h.first_hie_event_rn = 1
+                    THEN h.sending_source
+            END
+        ) AS first_hie_source,
+
+        MAX(
+            CASE
+                WHEN h.first_admission_message_rn = 1
+                 AND h.message_type IN ('A01', 'A04', 'A06')
+                    THEN h.message_type
+            END
+        ) AS first_admission_message_type,
+
+        MAX(
+            CASE
+                WHEN h.first_admission_message_rn = 1
+                 AND h.message_type IN ('A01', 'A04', 'A06')
+                    THEN h.message_timestamp
+            END
+        ) AS first_admission_message_timestamp,
+
+        MAX(
+            CASE
+                WHEN h.first_admission_message_rn = 1
+                 AND h.message_type IN ('A01', 'A04', 'A06')
+                    THEN h.insert_timestamp
+            END
+        ) AS first_admission_insert_timestamp,
+
+        MAX(
+            CASE
+                WHEN h.first_a03_message_rn = 1
+                 AND h.message_type = 'A03'
+                    THEN h.adt_discharge_ts
+            END
+        ) AS first_a03_discharge_ts,
+
+        MAX(
+            CASE
+                WHEN h.first_a03_message_rn = 1
+                 AND h.message_type = 'A03'
+                    THEN h.message_timestamp
+            END
+        ) AS first_a03_message_timestamp,
+
+        MAX(
+            CASE
+                WHEN h.first_a03_message_rn = 1
+                 AND h.message_type = 'A03'
+                    THEN h.insert_timestamp
+            END
+        ) AS first_a03_insert_timestamp,
+
+        MAX(
+            CASE
+                WHEN h.latest_discharge_value_rn = 1
+                    THEN h.adt_discharge_ts
+            END
+        ) AS latest_discharge_ts_any,
+
+        MAX(
+            CASE
+                WHEN h.latest_discharge_value_rn = 1
+                    THEN h.message_type
+            END
+        ) AS latest_discharge_message_type
+
+    FROM tmp_hie_message_ranked h
+
+    GROUP BY
+        h.member_id,
+        h.adt_admit_date
+),
+
+
+/* Distinct sending sources */
+source_values AS
+(
+    SELECT DISTINCT
+        member_id,
+        adt_admit_date,
+        sending_source
+
+    FROM tmp_hie_message_ranked
+
+    WHERE sending_source IS NOT NULL
+),
+
+source_list AS
+(
+    SELECT
+        member_id,
+        adt_admit_date,
+
+        LISTAGG(
+            sending_source,
+            ', '
+        )
+        WITHIN GROUP
+        (
+            ORDER BY sending_source
+        ) AS hie_sending_sources
+
+    FROM source_values
+
+    GROUP BY
+        member_id,
+        adt_admit_date
+),
+
+
+/* Distinct message types */
+message_type_values AS
+(
+    SELECT DISTINCT
+        member_id,
+        adt_admit_date,
+        message_type
+
+    FROM tmp_hie_message_ranked
+
+    WHERE message_type IS NOT NULL
+),
+
+message_type_list AS
+(
+    SELECT
+        member_id,
+        adt_admit_date,
+
+        LISTAGG(
+            message_type,
+            ','
+        )
+        WITHIN GROUP
+        (
+            ORDER BY message_type
+        ) AS message_types_seen
+
+    FROM message_type_values
+
+    GROUP BY
+        member_id,
+        adt_admit_date
+),
+
+
+/* Message counts */
+message_counts AS
+(
+    SELECT
+        member_id,
+        adt_admit_date,
+
+        MAX(total_message_count)
+            AS total_hie_message_count,
+
+        MAX(a01_message_count)
+            AS a01_message_count,
+
+        MAX(a02_transfer_count)
+            AS a02_transfer_count,
+
+        MAX(a03_message_count)
+            AS a03_message_count,
+
+        MAX(a08_message_count)
+            AS a08_message_count
+
+    FROM tmp_adt_message_counts
+
+    WHERE source_category = 'HIE_ADT'
+
+    GROUP BY
+        member_id,
+        adt_admit_date
+),
+
+
+combined AS
+(
+    SELECT
+        e.member_id,
+        e.adt_admit_date,
+        e.adt_admit_ts,
+
+        e.first_hie_source,
+
+        s.hie_sending_sources,
+        mt.message_types_seen,
+
+        e.first_admission_message_type,
+        e.first_admission_message_timestamp,
+        e.first_admission_insert_timestamp,
+
+        e.first_a03_discharge_ts,
+        e.first_a03_message_timestamp,
+        e.first_a03_insert_timestamp,
+
+        e.latest_discharge_ts_any,
+        e.latest_discharge_message_type,
+
+        COALESCE(
+            c.total_hie_message_count,
+            0
+        ) AS total_hie_message_count,
+
+        COALESCE(
+            c.a01_message_count,
+            0
+        ) AS a01_message_count,
+
+        COALESCE(
+            c.a02_transfer_count,
+            0
+        ) AS a02_transfer_count,
+
+        COALESCE(
+            c.a03_message_count,
+            0
+        ) AS a03_message_count,
+
+        COALESCE(
+            c.a08_message_count,
+            0
+        ) AS a08_message_count
+
+    FROM event_metrics e
+
+    LEFT JOIN source_list s
+        ON  e.member_id = s.member_id
+        AND e.adt_admit_date = s.adt_admit_date
+
+    LEFT JOIN message_type_list mt
+        ON  e.member_id = mt.member_id
+        AND e.adt_admit_date = mt.adt_admit_date
+
+    LEFT JOIN message_counts c
+        ON  e.member_id = c.member_id
+        AND e.adt_admit_date = c.adt_admit_date
+)
+
+SELECT
+    ROW_NUMBER() OVER
+    (
+        ORDER BY
+            member_id,
+            adt_admit_date
+    )::BIGINT AS adt_event_id,
+
+    combined.*
+
+FROM combined;
+```
