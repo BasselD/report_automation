@@ -271,574 +271,759 @@ fuzzy_matches = (
 
 ---
 
-# 7. Combine exact and fuzzy matches
+
+
+
+## Bottom line
+
+Do **not** use only:
 
 ```python
-comparison = pd.concat(
-    [
-        exact_matches,
-        fuzzy_matches,
-    ],
-    ignore_index=True,
-    sort=False
-)
+insert_timestamp - message_timestamp
 ```
 
-Add discharge-date comparisons.
+That measures **ADT ingestion or pipeline lag**, not how quickly the ADT notified you after the clinical event.
 
-```python
-comparison["discharge_date_difference"] = (
-    comparison["adt_discharge"]
-    - comparison["claim_discharge"]
-).dt.days
+You need three separate lag measures:
 
-comparison["discharge_match_flag"] = np.select(
-    [
-        comparison["claim_discharge"].isna()
-        | comparison["adt_discharge"].isna(),
+| Measure | Calculation | What it tells you |
+|---|---|---|
+| **Source notification lag** | `message_timestamp - clinical_event_timestamp` | How quickly the hospital generated the ADT |
+| **Pipeline ingestion lag** | `insert_timestamp - message_timestamp` | How quickly your platform received and loaded it |
+| **End-to-end lag** | `insert_timestamp - clinical_event_timestamp` | Total delay from the clinical event to data availability |
 
-        comparison["discharge_date_difference"].eq(0),
-
-        comparison["discharge_date_difference"].abs().le(1),
-    ],
-    [
-        "Missing Discharge Date",
-        "Exact Discharge Match",
-        "Discharge Within ±1 Day",
-    ],
-    default="Discharge Difference >1 Day"
-)
-```
+Your current process normalizes admission and discharge fields to dates and keeps the latest ADT row per hospitalization. That is appropriate for reconciliation, but it loses information needed to evaluate the first notification and the sequence of ADT messages. fileciteturn0file0
 
 ---
 
-# 8. Create the final reconciliation status
+# How `message_type` should be used
 
-```python
-comparison["overall_match_status"] = np.select(
-    [
-        comparison["match_method"].eq("Exact Admit Date")
-        & comparison["discharge_date_difference"].eq(0),
+Common HL7 interpretations are:
 
-        comparison["match_method"].eq("Exact Admit Date")
-        & comparison["discharge_date_difference"].abs().le(1),
+| Message type | Typical meaning | Recommended lag calculation |
+|---|---|---|
+| `A01` | Admission | Admission timestamp to first A01 message |
+| `A03` | Discharge | Discharge timestamp to first A03 message |
+| `A08` | Update to patient or encounter | Analyze separately as an update, not the original notification |
+| `A02` | Transfer | Analyze transfer notification if relevant |
+| `A04` | Registration | Sometimes used as an early encounter notification |
+| `A06` | Outpatient to inpatient | May function as an admission message in some feeds |
 
-        comparison["match_method"].eq("Fuzzy Admit Date ±1 Day")
-        & comparison["discharge_date_difference"].abs().le(1),
+Validate these against your local interface specifications because healthcare feeds occasionally use standard message types in nonstandard ways. A classic interoperability plot twist.
 
-        comparison["claim_discharge"].isna()
-        | comparison["adt_discharge"].isna(),
-    ],
-    [
-        "Exact Admit and Discharge",
-        "Exact Admit, Discharge Within ±1 Day",
-        "Fuzzy Admit and Discharge Within ±1 Day",
-        "Matched Admit, Missing Discharge",
-    ],
-    default="Matched Admit, Discharge Mismatch"
-)
+## Specifically for `A03`
+
+Yes. `A03` is generally the best message for measuring discharge notification timeliness:
+
+```text
+A03 message_timestamp - actual discharge timestamp
 ```
+
+Then measure the platform portion:
+
+```text
+A03 insert_timestamp - A03 message_timestamp
+```
+
+And the complete delay:
+
+```text
+A03 insert_timestamp - actual discharge timestamp
+```
+
+## Specifically for `A08`
+
+Do **not** normally use `A08` as the primary admission or discharge notification.
+
+Use it to measure:
+
+- How often hospitalization information gets corrected
+- How long updates continue after admission or discharge
+- Whether an A08 arrives after the A03
+- Whether discharge dates or other critical fields change
+- A08 ingestion lag between message and insert timestamps
+
+Without an explicit **update-effective timestamp**, you cannot reliably calculate clinical update lag for A08. You can only calculate its pipeline lag.
 
 ---
 
-# 9. Identify final unmatched claims and ADT events
+# Important change to your process
+
+Maintain two versions of the ADT data:
 
 ```python
-matched_claim_keys = comparison[
-    ["member_id", "claim_admit"]
-].drop_duplicates()
-
-claims_unmatched_final = claims.merge(
-    matched_claim_keys.assign(matched=1),
-    on=["member_id", "claim_admit"],
-    how="left"
-)
-
-claims_unmatched_final = claims_unmatched_final[
-    claims_unmatched_final["matched"].isna()
-].drop(columns="matched")
+adt_messages = all original ADT rows
+adt_events = one consolidated row per hospitalization
 ```
 
-```python
-matched_adt_keys = comparison[
-    ["member_id", "adt_admit"]
-].drop_duplicates()
+Use:
 
-adt_unmatched_final = adt.merge(
-    matched_adt_keys.assign(matched=1),
-    on=["member_id", "adt_admit"],
-    how="left"
-)
+- `adt_events` for claims-to-ADT matching
+- `adt_messages` for timeliness, sequencing, duplicates, and message-type analysis
 
-adt_unmatched_final = adt_unmatched_final[
-    adt_unmatched_final["matched"].isna()
-].drop(columns="matched")
-```
+Do not overwrite the full ADT message history when you deduplicate.
 
 ---
 
-# 10. Produce the comparison summary
+# 1. Prepare the complete ADT message history
+
+Start again from `df_adt`, not the already-deduplicated `adt` dataframe.
 
 ```python
-summary = pd.DataFrame(
-    {
-        "Metric": [
-            "Distinct claims events",
-            "Distinct ADT events",
-            "Exact admission matches",
-            "Fuzzy admission matches",
-            "Total matched claims events",
-            "Unmatched claims events",
-            "Unmatched ADT events",
-            "Claims match rate",
-            "ADT match rate",
-        ],
-        "Value": [
-            len(claims),
-            len(adt),
-            comparison["match_method"]
-                .eq("Exact Admit Date")
-                .sum(),
-            comparison["match_method"]
-                .eq("Fuzzy Admit Date ±1 Day")
-                .sum(),
-            comparison[
-                ["member_id", "claim_admit"]
-            ].drop_duplicates().shape[0],
-            len(claims_unmatched_final),
-            len(adt_unmatched_final),
-            comparison[
-                ["member_id", "claim_admit"]
-            ].drop_duplicates().shape[0] / len(claims)
-            if len(claims) else np.nan,
-            comparison[
-                ["member_id", "adt_admit"]
-            ].drop_duplicates().shape[0] / len(adt)
-            if len(adt) else np.nan,
-        ],
-    }
-)
-
-summary
-```
-
----
-
-## Monthly reconciliation view
-
-This helps determine whether missing ADT coverage is concentrated in particular months.
-
-```python
-claims_monthly = (
-    claims
-    .assign(month=claims["claim_admit"].dt.to_period("M").dt.to_timestamp())
-    .groupby("month")
-    .agg(
-        claim_events=("claim_admit", "size")
-    )
-    .reset_index()
-)
-
-adt_monthly = (
-    adt
-    .assign(month=adt["adt_admit"].dt.to_period("M").dt.to_timestamp())
-    .groupby("month")
-    .agg(
-        adt_events=("adt_admit", "size")
-    )
-    .reset_index()
-)
-
-matched_monthly = (
-    comparison
-    .assign(month=comparison["claim_admit"].dt.to_period("M").dt.to_timestamp())
-    .groupby("month")
-    .agg(
-        matched_events=("claim_admit", "size"),
-        exact_matches=(
-            "match_method",
-            lambda x: x.eq("Exact Admit Date").sum()
-        ),
-        fuzzy_matches=(
-            "match_method",
-            lambda x: x.eq("Fuzzy Admit Date ±1 Day").sum()
-        ),
-    )
-    .reset_index()
-)
-
-monthly_comparison = (
-    claims_monthly
-    .merge(adt_monthly, on="month", how="outer")
-    .merge(matched_monthly, on="month", how="outer")
-    .fillna(0)
-)
-
-monthly_comparison["claims_match_rate"] = (
-    monthly_comparison["matched_events"]
-    / monthly_comparison["claim_events"].replace(0, np.nan)
-)
-
-monthly_comparison["adt_match_rate"] = (
-    monthly_comparison["matched_events"]
-    / monthly_comparison["adt_events"].replace(0, np.nan)
-)
-
-monthly_comparison.sort_values("month")
-```
-
----
-
-# Same-timeframe comparison
-
-Because ADT data may lag claims, derive the latest **complete overlapping date**.
-
-```python
-claims_max_date = claims["claim_admit"].max()
-adt_max_date = adt["adt_admit"].max()
-
-overlap_end_date = min(
-    claims_max_date,
-    adt_max_date
-)
-
-overlap_start_date = max(
-    claims["claim_admit"].min(),
-    adt["adt_admit"].min()
-)
-
-print("Overlapping period:")
-print(overlap_start_date, "through", overlap_end_date)
-```
-
-Filter both datasets to the same range:
-
-```python
-claims_aligned = claims[
-    claims["claim_admit"].between(
-        overlap_start_date,
-        overlap_end_date
-    )
-].copy()
-
-adt_aligned = adt[
-    adt["adt_admit"].between(
-        overlap_start_date,
-        overlap_end_date
-    )
-].copy()
-```
-
-For an apples-to-apples YTD comparison:
-
-```python
-comparison_year = 2026
-
-current_end = min(
-    overlap_end_date,
-    pd.Timestamp(f"{comparison_year}-12-31")
-)
-
-current_start = pd.Timestamp(
-    f"{comparison_year}-01-01"
-)
-
-prior_start = current_start - pd.DateOffset(years=1)
-prior_end = current_end - pd.DateOffset(years=1)
-
-claims_current_ytd = claims[
-    claims["claim_admit"].between(
-        current_start,
-        current_end
-    )
-]
-
-claims_prior_aligned = claims[
-    claims["claim_admit"].between(
-        prior_start,
-        prior_end
-    )
-]
-```
-
-## Recommended output fields
-
-Keep this reconciliation table:
-
-```python
-comparison_output = comparison[
-    [
-        "member_id",
-        "claim_admit",
-        "claim_discharge",
-        "adt_admit",
-        "adt_discharge",
-        "insert_timestamp",
-        "message_timestamp",
-        "match_method",
-        "admit_date_difference",
-        "discharge_date_difference",
-        "discharge_match_flag",
-        "overall_match_status",
-    ]
-].sort_values(
-    ["member_id", "claim_admit"]
-)
-```
-
-This gives you a defensible way to answer:
-
-* How many claims admissions have an ADT?
-* How many match exactly?
-* How many need a date tolerance?
-* How much ADT coverage exists by month?
-* Are discharge dates aligned?
-* Is the apparent difference due to data latency or true missing events?
-
-For production QA, I would use **exact admit date as the primary match**, ±1 day only as the documented fallback, and report both separately.
-
----
-# lag calc
-That helps a lot. With message_type, you can calculate the lag correctly by event type instead of treating every ADT row the same.
-
-Recommended interpretation
-
-* A01 usually represents an inpatient admission
-* A02 usually represents a transfer
-* A03 usually represents discharge
-* A08 usually represents an update to patient or visit information
-
-So:
-
-* For admission notification lag, use A01
-* For discharge notification lag, use A03
-* For pipeline ingestion lag, use all message types
-* Treat A08 separately as an update-lag metric, not as an admission or discharge notification
-
-Add event-specific lag fields
-
 import pandas as pd
 import numpy as np
-adt = df_adt.copy()
-datetime_columns = [
-    "admit_date",
-    "discharge_date",
-    "message_timestamp",
-    "insert_timestamp",
-]
-for column in datetime_columns:
-    adt[column] = pd.to_datetime(
-        adt[column],
-        errors="coerce"
-    )
-adt["message_type"] = (
-    adt["message_type"]
+
+adt_messages = df_adt.rename(
+    columns={
+        "memberno": "member_id",
+    }
+).copy()
+
+adt_messages["member_id"] = (
+    adt_messages["member_id"]
     .astype(str)
     .str.strip()
     .str.upper()
 )
 
-Pipeline ingestion lag
+adt_messages["message_type"] = (
+    adt_messages["message_type"]
+    .astype("string")
+    .str.strip()
+    .str.upper()
+)
 
-This works for every ADT message:
+# Preserve the complete timestamp.
+# Do not normalize these fields yet.
+adt_messages["adt_admit_ts"] = pd.to_datetime(
+    adt_messages["admit_date"],
+    errors="coerce"
+)
 
-adt["ingestion_lag_hours"] = (
-    adt["insert_timestamp"]
-    - adt["message_timestamp"]
+adt_messages["adt_discharge_ts"] = pd.to_datetime(
+    adt_messages["discharge_date"],
+    errors="coerce"
+)
+
+adt_messages["message_timestamp"] = pd.to_datetime(
+    adt_messages["message_timestamp"],
+    errors="coerce"
+)
+
+adt_messages["insert_timestamp"] = pd.to_datetime(
+    adt_messages["insert_timestamp"],
+    errors="coerce"
+)
+
+# Date keys used for matching and grouping
+adt_messages["adt_admit"] = (
+    adt_messages["adt_admit_ts"]
+    .dt.normalize()
+)
+
+adt_messages["adt_discharge"] = (
+    adt_messages["adt_discharge_ts"]
+    .dt.normalize()
+)
+```
+
+## Time-zone warning
+
+Confirm that all four timestamps use the same timezone.
+
+A three-hour lag can be a real delay, or it can be Eastern Time arguing with UTC. Check this before interpreting negative or unusually large values.
+
+---
+
+# 2. Calculate message-level pipeline lag
+
+This applies to every message type, including A03 and A08.
+
+```python
+adt_messages["pipeline_lag_hours"] = (
+    adt_messages["insert_timestamp"]
+    - adt_messages["message_timestamp"]
 ).dt.total_seconds() / 3600
 
-Admission notification lag
+adt_messages["pipeline_lag_minutes"] = (
+    adt_messages["insert_timestamp"]
+    - adt_messages["message_timestamp"]
+).dt.total_seconds() / 60
+```
 
-adt["admission_notification_lag_hours"] = np.where(
-    adt["message_type"].eq("A01"),
-    (
-        adt["message_timestamp"]
-        - adt["admit_date"]
-    ).dt.total_seconds() / 3600,
-    np.nan
+Add QA flags:
+
+```python
+adt_messages["negative_pipeline_lag_flag"] = (
+    adt_messages["pipeline_lag_hours"] < 0
 )
 
-Discharge notification lag
+adt_messages["missing_pipeline_timestamp_flag"] = (
+    adt_messages["message_timestamp"].isna()
+    | adt_messages["insert_timestamp"].isna()
+)
+```
 
-adt["discharge_notification_lag_hours"] = np.where(
-    adt["message_type"].eq("A03"),
-    (
-        adt["message_timestamp"]
-        - adt["discharge_date"]
-    ).dt.total_seconds() / 3600,
-    np.nan
+Negative values usually indicate:
+
+- Time-zone inconsistency
+- Clock synchronization issues
+- Incorrect field definitions
+- Batch reprocessing
+- A message timestamp that is not actually the send timestamp
+
+Do not silently convert negative values to zero. They are QA findings.
+
+---
+
+# 3. Calculate clinical-event lag by message type
+
+```python
+ADMISSION_TYPES = ["A01", "A04", "A06"]
+DISCHARGE_TYPES = ["A03"]
+
+adt_messages["clinical_event_timestamp"] = pd.NaT
+adt_messages["clinical_event_type"] = pd.NA
+
+admission_mask = adt_messages["message_type"].isin(
+    ADMISSION_TYPES
 )
 
-Update lag
-
-For A08, it is safer to measure only pipeline ingestion unless you have a separate event-effective timestamp.
-
-adt["update_ingestion_lag_hours"] = np.where(
-    adt["message_type"].eq("A08"),
-    adt["ingestion_lag_hours"],
-    np.nan
+discharge_mask = adt_messages["message_type"].isin(
+    DISCHARGE_TYPES
 )
 
-Better encounter-level ADT summary
+adt_messages.loc[
+    admission_mask,
+    "clinical_event_timestamp"
+] = adt_messages.loc[
+    admission_mask,
+    "adt_admit_ts"
+]
 
-Because each hospitalization can have multiple ADT messages, build one row per member and admission event.
+adt_messages.loc[
+    admission_mask,
+    "clinical_event_type"
+] = "Admission"
 
-adt_event_summary = (
-    adt
+adt_messages.loc[
+    discharge_mask,
+    "clinical_event_timestamp"
+] = adt_messages.loc[
+    discharge_mask,
+    "adt_discharge_ts"
+]
+
+adt_messages.loc[
+    discharge_mask,
+    "clinical_event_type"
+] = "Discharge"
+```
+
+Calculate source and end-to-end lag:
+
+```python
+adt_messages["source_notification_lag_hours"] = (
+    adt_messages["message_timestamp"]
+    - adt_messages["clinical_event_timestamp"]
+).dt.total_seconds() / 3600
+
+adt_messages["end_to_end_lag_hours"] = (
+    adt_messages["insert_timestamp"]
+    - adt_messages["clinical_event_timestamp"]
+).dt.total_seconds() / 3600
+```
+
+QA flags:
+
+```python
+adt_messages["negative_source_lag_flag"] = (
+    adt_messages["source_notification_lag_hours"] < 0
+)
+
+adt_messages["negative_end_to_end_lag_flag"] = (
+    adt_messages["end_to_end_lag_hours"] < 0
+)
+```
+
+---
+
+# If admit and discharge are dates only
+
+If `admit_date` and `discharge_date` do not contain the actual event time, do **not** interpret the hourly lag literally. Midnight will be inserted automatically, which can overstate the delay by many hours.
+
+Use calendar-day lag instead:
+
+```python
+adt_messages["clinical_notification_lag_days"] = (
+    adt_messages["message_timestamp"].dt.normalize()
+    - adt_messages["clinical_event_timestamp"].dt.normalize()
+).dt.days
+
+adt_messages["clinical_to_insert_lag_days"] = (
+    adt_messages["insert_timestamp"].dt.normalize()
+    - adt_messages["clinical_event_timestamp"].dt.normalize()
+).dt.days
+```
+
+Then report categories such as:
+
+- Same calendar day
+- One day later
+- Two or more days later
+
+For precise hourly timeliness, you need actual:
+
+- Admission datetime
+- Discharge datetime
+- Message datetime
+- Insert datetime
+
+---
+
+# 4. Select the first admission and discharge notification
+
+For timeliness, use the **first relevant message**, not the latest message.
+
+```python
+event_keys = [
+    "member_id",
+    "adt_admit",
+]
+```
+
+If available, add encounter ID and facility:
+
+```python
+# Preferred example:
+# event_keys = [
+#     "member_id",
+#     "facility_id",
+#     "encounter_id",
+# ]
+```
+
+## First admission notification
+
+```python
+first_admission_message = (
+    adt_messages[
+        adt_messages["message_type"].isin(ADMISSION_TYPES)
+    ]
+    .sort_values(
+        event_keys
+        + ["message_timestamp", "insert_timestamp"]
+    )
+    .drop_duplicates(
+        subset=event_keys,
+        keep="first"
+    )
+    [
+        event_keys
+        + [
+            "message_type",
+            "adt_admit_ts",
+            "message_timestamp",
+            "insert_timestamp",
+            "pipeline_lag_hours",
+            "source_notification_lag_hours",
+            "end_to_end_lag_hours",
+        ]
+    ]
+    .rename(
+        columns={
+            "message_type": "admit_message_type",
+            "adt_admit_ts": "admit_event_timestamp",
+            "message_timestamp": "admit_message_timestamp",
+            "insert_timestamp": "admit_insert_timestamp",
+            "pipeline_lag_hours": "admit_pipeline_lag_hours",
+            "source_notification_lag_hours":
+                "admit_source_lag_hours",
+            "end_to_end_lag_hours":
+                "admit_end_to_end_lag_hours",
+        }
+    )
+)
+```
+
+## First A03 discharge notification
+
+```python
+first_discharge_message = (
+    adt_messages[
+        adt_messages["message_type"].eq("A03")
+    ]
+    .sort_values(
+        event_keys
+        + ["message_timestamp", "insert_timestamp"]
+    )
+    .drop_duplicates(
+        subset=event_keys,
+        keep="first"
+    )
+    [
+        event_keys
+        + [
+            "adt_discharge_ts",
+            "message_timestamp",
+            "insert_timestamp",
+            "pipeline_lag_hours",
+            "source_notification_lag_hours",
+            "end_to_end_lag_hours",
+        ]
+    ]
+    .rename(
+        columns={
+            "adt_discharge_ts": "discharge_event_timestamp",
+            "message_timestamp": "a03_message_timestamp",
+            "insert_timestamp": "a03_insert_timestamp",
+            "pipeline_lag_hours": "a03_pipeline_lag_hours",
+            "source_notification_lag_hours":
+                "discharge_source_lag_hours",
+            "end_to_end_lag_hours":
+                "discharge_end_to_end_lag_hours",
+        }
+    )
+)
+```
+
+---
+
+# 5. Summarize A08 update activity
+
+```python
+a08_summary = (
+    adt_messages[
+        adt_messages["message_type"].eq("A08")
+    ]
     .groupby(
-        ["memberno", "admit_date"],
+        event_keys,
         dropna=False
     )
     .agg(
-        adt_discharge=("discharge_date", "max"),
-        first_message_timestamp=(
+        a08_message_count=(
+            "message_type",
+            "size"
+        ),
+        first_a08_message_timestamp=(
             "message_timestamp",
             "min"
         ),
-        latest_message_timestamp=(
+        last_a08_message_timestamp=(
             "message_timestamp",
             "max"
         ),
-        first_insert_timestamp=(
+        first_a08_insert_timestamp=(
             "insert_timestamp",
             "min"
         ),
-        latest_insert_timestamp=(
+        last_a08_insert_timestamp=(
             "insert_timestamp",
             "max"
         ),
-        first_a01_message_timestamp=(
-            "message_timestamp",
-            lambda x: x[
-                adt.loc[x.index, "message_type"].eq("A01")
-            ].min()
-        ),
-        first_a03_message_timestamp=(
-            "message_timestamp",
-            lambda x: x[
-                adt.loc[x.index, "message_type"].eq("A03")
-            ].min()
-        ),
-        first_a01_insert_timestamp=(
-            "insert_timestamp",
-            lambda x: x[
-                adt.loc[x.index, "message_type"].eq("A01")
-            ].min()
-        ),
-        first_a03_insert_timestamp=(
-            "insert_timestamp",
-            lambda x: x[
-                adt.loc[x.index, "message_type"].eq("A03")
-            ].min()
-        ),
-        a01_count=(
-            "message_type",
-            lambda x: x.eq("A01").sum()
-        ),
-        a03_count=(
-            "message_type",
-            lambda x: x.eq("A03").sum()
-        ),
-        a08_count=(
-            "message_type",
-            lambda x: x.eq("A08").sum()
-        ),
-    )
-    .reset_index()
-)
-
-Then calculate the real encounter-level lags:
-
-adt_event_summary["admission_message_lag_hours"] = (
-    adt_event_summary["first_a01_message_timestamp"]
-    - adt_event_summary["admit_date"]
-).dt.total_seconds() / 3600
-adt_event_summary["admission_available_lag_hours"] = (
-    adt_event_summary["first_a01_insert_timestamp"]
-    - adt_event_summary["admit_date"]
-).dt.total_seconds() / 3600
-adt_event_summary["discharge_message_lag_hours"] = (
-    adt_event_summary["first_a03_message_timestamp"]
-    - adt_event_summary["adt_discharge"]
-).dt.total_seconds() / 3600
-adt_event_summary["discharge_available_lag_hours"] = (
-    adt_event_summary["first_a03_insert_timestamp"]
-    - adt_event_summary["adt_discharge"]
-).dt.total_seconds() / 3600
-
-Add ADT completeness flags
-
-adt_event_summary["has_a01_flag"] = (
-    adt_event_summary["a01_count"] > 0
-).astype(int)
-adt_event_summary["has_a03_flag"] = (
-    adt_event_summary["a03_count"] > 0
-).astype(int)
-adt_event_summary["complete_adt_sequence_flag"] = (
-    adt_event_summary["has_a01_flag"].eq(1)
-    & adt_event_summary["has_a03_flag"].eq(1)
-).astype(int)
-
-Join this back to your claims comparison
-
-final_adt_reconciliation = (
-    final_adt_reconciliation
-    .drop(
-        columns=[
-            column
-            for column in adt_event_summary.columns
-            if column in final_adt_reconciliation.columns
-            and column not in ["member_id", "claim_admit"]
-        ],
-        errors="ignore"
-    )
-    .merge(
-        adt_event_summary.rename(
-            columns={
-                "memberno": "member_id",
-                "admit_date": "adt_admit",
-            }
-        ),
-        on=["member_id", "adt_admit"],
-        how="left"
-    )
-)
-
-Best headline measures
-
-For the QA view, report:
-
-ADT coverage rate
-A01 availability rate
-A03 availability rate
-Complete A01 + A03 sequence rate
-Median admission availability lag
-P90 admission availability lag
-Median discharge availability lag
-P90 discharge availability lag
-Median ingestion lag by message type
-
-And summarize by message_type:
-
-message_type_lag_summary = (
-    adt
-    .groupby("message_type")
-    .agg(
-        message_count=("message_type", "size"),
-        median_ingestion_lag_hours=(
-            "ingestion_lag_hours",
+        median_a08_pipeline_lag_hours=(
+            "pipeline_lag_hours",
             "median"
         ),
-        p90_ingestion_lag_hours=(
-            "ingestion_lag_hours",
-            lambda x: x.quantile(0.90)
-        ),
-        p95_ingestion_lag_hours=(
-            "ingestion_lag_hours",
-            lambda x: x.quantile(0.95)
+        max_a08_pipeline_lag_hours=(
+            "pipeline_lag_hours",
+            "max"
         ),
     )
     .reset_index()
+)
+```
+
+A high A08 count may indicate:
+
+- Normal encounter updates
+- Repeated demographic updates
+- Discharge-date corrections
+- Duplicate messages
+- A noisy source interface
+
+It is not automatically bad, but it should be analyzed by facility and sender.
+
+---
+
+# 6. Build one timing record per ADT event
+
+```python
+event_message_summary = (
+    adt_messages
+    .groupby(
+        event_keys,
+        dropna=False
+    )
+    .agg(
+        adt_message_count=(
+            "message_type",
+            "size"
+        ),
+        first_adt_message_timestamp=(
+            "message_timestamp",
+            "min"
+        ),
+        last_adt_message_timestamp=(
+            "message_timestamp",
+            "max"
+        ),
+        first_adt_insert_timestamp=(
+            "insert_timestamp",
+            "min"
+        ),
+        last_adt_insert_timestamp=(
+            "insert_timestamp",
+            "max"
+        ),
+        message_types_seen=(
+            "message_type",
+            lambda values: ",".join(
+                sorted(
+                    set(
+                        values
+                        .dropna()
+                        .astype(str)
+                    )
+                )
+            )
+        ),
+        negative_pipeline_lag_count=(
+            "negative_pipeline_lag_flag",
+            "sum"
+        ),
+    )
+    .reset_index()
+)
+```
+
+Combine the timing components:
+
+```python
+event_timing = (
+    event_message_summary
+    .merge(
+        first_admission_message,
+        on=event_keys,
+        how="left",
+        validate="1:1"
+    )
+    .merge(
+        first_discharge_message,
+        on=event_keys,
+        how="left",
+        validate="1:1"
+    )
+    .merge(
+        a08_summary,
+        on=event_keys,
+        how="left",
+        validate="1:1"
+    )
+)
+```
+
+---
+
+# 7. Attach the fields to your existing final summary
+
+Assuming your concatenated dataframe is called:
+
+```python
+final_summary
+```
+
+Standardize the merge fields:
+
+```python
+final_summary = final_summary.copy()
+
+final_summary["member_id"] = (
+    final_summary["member_id"]
+    .astype(str)
+    .str.strip()
+    .str.upper()
+)
+
+final_summary["adt_admit"] = pd.to_datetime(
+    final_summary["adt_admit"],
+    errors="coerce"
+).dt.normalize()
+```
+
+Merge the timing information:
+
+```python
+final_summary = final_summary.merge(
+    event_timing,
+    on=[
+        "member_id",
+        "adt_admit",
+    ],
+    how="left",
+    validate="m:1"
+)
+```
+
+Because your unmatched claims do not have an ADT event, their lag fields will correctly remain null.
+
+Add an interpretable status:
+
+```python
+final_summary["adt_availability_status"] = np.select(
+    [
+        final_summary["adt_admit"].isna(),
+
+        final_summary["a03_message_timestamp"].notna(),
+
+        final_summary["admit_message_timestamp"].notna(),
+
+        final_summary["first_adt_message_timestamp"].notna(),
+    ],
+    [
+        "Claims Event Missing ADT",
+        "ADT Matched with A03",
+        "ADT Matched with Admission Message",
+        "ADT Matched but No Admission/A03 Message",
+    ],
+    default="Unknown"
+)
+```
+
+Add message-presence flags:
+
+```python
+final_summary["admission_message_flag"] = (
+    final_summary["admit_message_timestamp"]
+    .notna()
+    .astype(int)
+)
+
+final_summary["a03_discharge_message_flag"] = (
+    final_summary["a03_message_timestamp"]
+    .notna()
+    .astype(int)
+)
+
+final_summary["a08_update_flag"] = (
+    final_summary["a08_message_count"]
+    .fillna(0)
+    .gt(0)
+    .astype(int)
+)
+```
+
+---
+
+# Recommended final fields
+
+```python
+lag_columns = [
+    "member_id",
+    "claim_admit",
+    "claim_discharge",
+    "adt_admit",
+    "adt_discharge",
+
+    "adt_availability_status",
+    "adt_message_count",
+    "message_types_seen",
+
+    "admit_message_type",
+    "admit_event_timestamp",
+    "admit_message_timestamp",
+    "admit_insert_timestamp",
+    "admit_source_lag_hours",
+    "admit_pipeline_lag_hours",
+    "admit_end_to_end_lag_hours",
+
+    "discharge_event_timestamp",
+    "a03_message_timestamp",
+    "a03_insert_timestamp",
+    "discharge_source_lag_hours",
+    "a03_pipeline_lag_hours",
+    "discharge_end_to_end_lag_hours",
+
+    "a08_message_count",
+    "first_a08_message_timestamp",
+    "last_a08_message_timestamp",
+    "median_a08_pipeline_lag_hours",
+
+    "match_method",
+    "overall_match_status",
+]
+```
+
+Use only columns that exist:
+
+```python
+lag_columns = [
+    column
+    for column in lag_columns
+    if column in final_summary.columns
+]
+
+final_output = (
+    final_summary[lag_columns]
+    .sort_values(
+        ["member_id", "claim_admit"]
+    )
+)
+```
+
+---
+
+# Yes, reconsider the analysis slightly
+
+Your analysis should now have two distinct dimensions.
+
+## 1. Reliability and completeness
+
+Use claims as the reference:
+
+```text
+Claims hospitalization with matched ADT
+÷
+Mature claims hospitalizations
+```
+
+Report:
+
+- Exact match rate
+- Fuzzy match rate
+- Unmatched claims rate
+- Unmatched ADT rate
+- A01 or admission-message presence
+- A03 presence
+- Coverage by facility, month, provider group, and source system
+
+Use a mature claims period. Recent claims may not have completed runout, so they should not be used to declare an ADT event missing.
+
+## 2. Timeliness
+
+Among matched ADT events, report:
+
+- Median and 90th or 95th percentile admission end-to-end lag
+- Median and 90th or 95th percentile discharge end-to-end lag
+- Percentage available within 1, 4, 8, and 24 hours
+- Pipeline lag separately from hospital notification lag
+- Negative lag rate
+- Missing timestamp rate
+- Results by message type and facility
+
+The most defensible primary metrics are:
+
+```text
+Admission availability:
+First valid admission insert timestamp
+minus admission event timestamp
+
+Discharge availability:
+First A03 insert timestamp
+minus discharge event timestamp
+```
+
+The distinction matters. An ADT feed can be highly complete but slow, or very fast but missing 20% of inpatient stays. One score would hide that problem. Keep **coverage** and **timeliness** as separate KPIs.
 )
 
 This is much more defensible than calculating one generic lag from the latest retained ADT row. A08 updates can otherwise make the data look late even when the original admission or discharge notification arrived on time.
