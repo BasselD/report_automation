@@ -251,6 +251,132 @@ GROUP BY reporting_group, ipa_name, servicefacility, care_type;
 - Widened the admit_date lower bound from `2024-12-01` to `2024-01-01` so long LTAC/SNF stays admitted well before December 2024 aren't dropped.
 - Restricted the `message_timestamp` clause to only fire when both `admit_date` and `discharge_date` are null, so it acts purely as a fallback rather than a third independent inclusion path.
 - Added `source_category` classification directly into the candidate pull (Step 1), based on `sending_source` patterns per HL7 ADT conventions. [hl7-definition.caristix](https://hl7-definition.caristix.com/v2/HL7v2.3/TriggerEvents)
+
+# DQA
+Good instinct — validating output is just as important as building the pipeline correctly. Here's a structured QA plan tailored specifically to this reconciliation process, organized by what could silently go wrong at each stage. [designgurus](https://www.designgurus.io/answers/detail/quality-assurance-techniques-to-validate-coding-solutions-quickly)
+
+## Row count integrity checks
+
+The single most important check is confirming that joins didn't inflate your event population.
+
+```sql
+SELECT COUNT(*) AS ip_raw_count FROM ip_raw;
+SELECT COUNT(*) AS ed_obs_raw_count FROM ed_obs_raw;
+SELECT COUNT(*) AS tmp_events_2025_count FROM tmp_events_2025;
+SELECT COUNT(DISTINCT event_id) AS distinct_events FROM tmp_events_2025;
+
+SELECT COUNT(*) AS final_row_count FROM analytics.notification_reconciliation_2025;
+SELECT COUNT(DISTINCT event_id) AS distinct_final_events FROM analytics.notification_reconciliation_2025;
+```
+
+If `final_row_count` doesn't equal `distinct_final_events`, the `LEFT JOIN` to `tmp_event_notification_flags` fanned out — meaning a single event matched multiple notification rows and duplicated instead of aggregating. This is the exact kind of silent inflation that breaks percentages downstream. [dfe-analytical-services.github](https://dfe-analytical-services.github.io/how-to-qa/coding.html)
+
+## Match method distribution sanity check
+
+```sql
+SELECT source_category, match_method, COUNT(*) 
+FROM tmp_source_match_map
+GROUP BY source_category, match_method
+ORDER BY source_category, match_method;
+```
+
+You want to see exact matches vastly outnumbering fuzzy matches. If fuzzy matches dominate any one source, that suggests a systematic date offset (e.g., timezone shift, or admit_date vs. discharge_date confusion) rather than genuine day-to-day noise. [dfe-analytical-services.github](https://dfe-analytical-services.github.io/how-to-qa/coding.html)
+
+## Coverage category cross-check
+
+Cross-tab `care_type` against `notification_status` to see if gaps cluster in a way that makes clinical sense.
+
+```sql
+SELECT care_type, notification_status, COUNT(*) 
+FROM analytics.notification_reconciliation_2025
+GROUP BY care_type, notification_status
+ORDER BY care_type, notification_status;
+```
+
+If ED visits show near-zero authorization matches, that's expected (ED usually isn't authorized), but if IP stays show near-zero authorization matches too, that's a red flag worth investigating, since IP typically requires prior auth. [getempowerhealth](https://getempowerhealth.com/for-providers/utilization-management/prior-authorization-list/)
+
+## Spot-check a known sample
+
+Pick 10–15 events with known outcomes — ones you can manually trace in source systems — and confirm the pipeline classifies them correctly. This is the single highest-value QA step because automated checks can't catch logic errors that "look" correct in aggregate. [reddit](https://www.reddit.com/r/ExperiencedDevs/comments/1rzq738/what_tools_and_techniques_are_you_using_to_verify/)
+
+```sql
+SELECT * FROM analytics.notification_reconciliation_2025
+WHERE person_id IN (12345, 67890, ...)
+ORDER BY person_id, event_admit_date;
+```
+
+Manually verify: does the matched ADT record's admit date actually align with the claim? Is the source classification correct given the actual `sending_source` value?
+
+## Source classification validation
+
+Confirm your `LIKE` patterns in `source_category` aren't missing or misclassifying values.
+
+```sql
+SELECT sending_source, source_category, COUNT(*) 
+FROM adt_events_candidate
+GROUP BY sending_source, source_category
+ORDER BY source_category, COUNT(*) DESC;
+```
+
+Look specifically for high-volume `sending_source` values landing in `OTHER` or `UNCLASSIFIED` — that means your patterns missed a major feed, and your EMR/HIE counts are understated. [hl7-definition.caristix](https://hl7-definition.caristix.com/v2/HL7v2.3/TriggerEvents)
+
+## Duplicate and fan-out check on the match map
+
+```sql
+SELECT event_id, source_category, COUNT(*) 
+FROM tmp_source_match_map
+GROUP BY event_id, source_category
+HAVING COUNT(*) > 1;
+```
+
+This should return zero rows. If it doesn't, one event matched two ADT records from the same source, meaning your fuzzy match `ROW_NUMBER` tie-breaking logic let a duplicate through. [designgurus](https://www.designgurus.io/answers/detail/quality-assurance-techniques-to-validate-coding-solutions-quickly)
+
+## Discharge date null-rate check
+
+Since ED/OBS discharge dates are sometimes inferred, and IP discharge is what anchors eligibility, confirm nulls aren't hiding a bigger problem.
+
+```sql
+SELECT care_type, 
+       SUM(discharge_date_inferred_flag) AS inferred_count,
+       COUNT(*) AS total_count,
+       ROUND(100.0 * SUM(discharge_date_inferred_flag) / COUNT(*), 2) AS pct_inferred
+FROM analytics.notification_reconciliation_2025
+GROUP BY care_type;
+```
+
+## Reasonableness check against known benchmarks
+
+Compare your `percent_no_notification` by care_type against what you'd expect operationally. If ED shows dramatically higher no-notification rates than IP, that's plausible (ED visits are shorter and often skip formal ADT), but if IP shows a high no-notification rate, that's the number leadership will scrutinize hardest, so trace a sample of those specific "No Notification" IP events back to source before presenting. [dss.mo](https://dss.mo.gov/mhd/hie-onboarding/files/RecommendedADTSpecifications.pdf)
+
+## Trend check across time
+
+```sql
+SELECT DATE_TRUNC('month', event_admit_date) AS admit_month,
+       care_type,
+       COUNT(*) AS total_events,
+       SUM(no_notification_flag) AS no_notification,
+       ROUND(100.0 * SUM(no_notification_flag) / COUNT(*), 2) AS pct_no_notification
+FROM analytics.notification_reconciliation_2025
+GROUP BY DATE_TRUNC('month', event_admit_date), care_type
+ORDER BY admit_month, care_type;
+```
+
+A sudden spike or drop in a specific month often points to a feed outage, a facility onboarding/offboarding, or a code change — this is one of the fastest ways to catch a data quality issue rather than a true trend. [dfe-analytical-services.github](https://dfe-analytical-services.github.io/how-to-qa/coding.html)
+
+## Recommended QA sequence
+
+| Step | What it catches |
+|---|---|
+| Row count integrity | Join fan-out / duplication |
+| Match method distribution | Systematic date offset issues |
+| Coverage cross-tab | Illogical clinical patterns |
+| Manual spot-check | Logic errors invisible in aggregate |
+| Source classification audit | Misclassified/missed feeds |
+| Duplicate match check | Fuzzy-match tie-break failures |
+| Discharge null-rate | Inferred-date reliability |
+| Monthly trend | Feed outages, onboarding gaps |
+
+Run these roughly in that order — the row-count and duplicate checks first, since if those fail, everything downstream is unreliable regardless of how reasonable the final numbers look. [designgurus](https://www.designgurus.io/answers/detail/quality-assurance-techniques-to-validate-coding-solutions-quickly)
 - Switched every join and grouping key from `member_id`/`memberno` to `person_id`, matching `ip_raw`/`ed_obs_raw`.
 
 One thing to sanity-check on your end: verify the actual distinct values in `sending_source` for MedHOK, EMR, and HIE feeds, since the `LIKE` patterns here are best guesses — if your feed uses different labels (e.g., a specific EHR vendor code instead of "EMR"), the `source_category` buckets will misclassify silently rather than error out.
