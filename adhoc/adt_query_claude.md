@@ -1,19 +1,68 @@
-/*==============================================================================
-  0. PARAMETERS
-==============================================================================*/
-DROP TABLE IF EXISTS tmp_params;
-CREATE TEMP TABLE tmp_params AS
-SELECT
-    DATE '2025-01-01' AS start_date,
-    DATE '2026-01-01' AS end_date,
-    1::INTEGER       AS fuzzy_days;
+Your current query is understandable, but for this reconciliation it should be changed in a more fundamental way than simply replacing `admit_date` with `discharge_date`.
 
-/*==============================================================================
-  1. ADT CANDIDATE PULL — full universe, no enrollment join
-     Wide net: catches long stays admitted in 2024, discharged in 2025.
-     Fallback clause only applies to records missing both admit/discharge dates.
-==============================================================================*/
+## The main issue
+
+Your **claims table should define the CareAllies-eligible denominator**.
+
+The ADT table should represent the available notification universe. If you also independently filter ADT through enrollment, you risk excluding legitimate notifications that should be matched to an eligible claim.
+
+For example:
+
+* Member admitted December 28, 2024
+* Member discharged January 3, 2025
+* Member is eligible on January 3
+* A01 admission message occurred in December 2024
+* A03 discharge message occurred in January 2025
+
+Your current filter:
+
+```sql
+WHERE adt.admit_date >= DATE '2025-01-01'
+  AND adt.admit_date <  DATE '2026-01-01'
+```
+
+would exclude the December 2024 admission notification, even though the hospitalization belongs in your 2025 discharge cohort.
+
+Changing the filter entirely to `discharge_date` would create the opposite problem because admission messages often have no discharge date yet.
+
+# Recommended approach
+
+## 1. Let claims control eligibility
+
+Use the CareAllies enrollment filter in:
+
+* `ip_raw`
+* `ed_obs_raw`
+
+Those tables define which events belong in the analysis.
+
+Then match all relevant ADT notifications to those eligible events.
+
+## 2. Do not require enrollment in the ADT extraction
+
+You generally do not need this join in the base ADT table:
+
+```sql
+INNER JOIN sandbox.CA_Core_Enrollment_Detail enr
+    ON adt.person_id = enr.personid
+```
+
+The IPA and reporting group should come from the enrollment row associated with the **claims event**, not independently from the ADT message.
+
+Otherwise, the same hospitalization could receive different attribution depending on whether you use:
+
+* admission month
+* discharge month
+* message month
+* enrollment snapshot month
+
+That creates attribution inconsistencies.
+
+# Recommended ADT base query
+
+```sql
 DROP TABLE IF EXISTS adt_events_candidate;
+
 CREATE TEMP TABLE adt_events_candidate AS
 
 SELECT
@@ -45,199 +94,222 @@ SELECT
     adt.event_location,
 
     CASE
-        WHEN UPPER(TRIM(adt.message_type)) IN ('A01', 'A04', 'A05', 'A06')
+        WHEN UPPER(TRIM(adt.message_type)) IN ('A01', 'A04', 'A06')
             THEN 'ADMISSION'
+
         WHEN UPPER(TRIM(adt.message_type)) = 'A03'
             THEN 'DISCHARGE'
+
         WHEN UPPER(TRIM(adt.message_type)) = 'A02'
             THEN 'TRANSFER'
+
         WHEN UPPER(TRIM(adt.message_type)) = 'A08'
             THEN 'UPDATE'
-        ELSE 'OTHER'
-    END AS notification_role,
 
-    CASE
-        WHEN UPPER(TRIM(COALESCE(adt.sending_source, ''))) LIKE '%MEDHOK%'
-            THEN 'AUTHORIZATION'
-        WHEN UPPER(TRIM(COALESCE(adt.sending_source, ''))) LIKE '%EMR%'
-          OR UPPER(TRIM(COALESCE(adt.sending_source, ''))) LIKE '%EPIC%'
-          OR UPPER(TRIM(COALESCE(adt.sending_source, ''))) LIKE '%CERNER%'
-            THEN 'EMR'
-        WHEN UPPER(TRIM(COALESCE(adt.sending_source, ''))) LIKE '%HIE%'
-            THEN 'HIE_ADT'
-        WHEN adt.sending_source IS NOT NULL
-            THEN 'OTHER'
-        ELSE 'UNCLASSIFIED'
-    END AS source_category
+        ELSE 'OTHER'
+    END AS notification_role
 
 FROM qdwwh.dbo_adt adt
 
 WHERE
 (
-       CAST(adt.admit_date AS DATE) >= DATE '2024-01-01'
-       AND CAST(adt.admit_date AS DATE) <  DATE '2026-01-01'
+       CAST(adt.admit_date AS DATE)
+           BETWEEN DATE '2024-12-01' AND DATE '2025-12-31'
 
     OR CAST(adt.discharge_date AS DATE)
            BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
 
-    OR (
-           adt.admit_date IS NULL
-       AND adt.discharge_date IS NULL
-       AND CAST(adt.message_timestamp AS DATE)
-               BETWEEN DATE '2025-01-01' AND DATE '2025-12-31'
-       )
+    OR CAST(adt.message_timestamp AS DATE)
+           BETWEEN DATE '2024-12-01' AND DATE '2025-12-31'
 );
+```
 
-/*==============================================================================
-  2. COLLAPSE ADT TO ONE ROW PER PERSON + ADMIT DATE + SOURCE CATEGORY
-==============================================================================*/
-DROP TABLE IF EXISTS tmp_adt_events;
-CREATE TEMP TABLE tmp_adt_events AS
+The December 2024 buffer allows you to capture admission messages associated with early-2025 discharges. You could widen the buffer if very long inpatient stays are possible.
 
-SELECT
-    ROW_NUMBER() OVER (ORDER BY personid, admit_date, source_category) ::BIGINT AS adt_event_id,
-    personid,
-    admit_date AS adt_admit_date,
-    source_category,
+# Better candidate-window logic
 
-    MAX(CASE WHEN message_type IN ('A01','A04','A05','A06') THEN admit_date END) AS admission_msg_date,
-    MAX(CASE WHEN message_type = 'A03' THEN discharge_date END)                  AS a03_discharge_date,
-    MAX(discharge_date)                                                          AS any_discharge_date,
+A stronger version is to derive the minimum and maximum dates directly from your claims spine:
 
-    LISTAGG(DISTINCT sending_source, ', ') AS sending_sources,
-    LISTAGG(DISTINCT message_type, ',')    AS message_types_seen
+```sql
+DROP TABLE IF EXISTS adt_events_candidate;
 
-FROM adt_events_candidate
-WHERE source_category IN ('AUTHORIZATION', 'HIE_ADT', 'EMR', 'OTHER')
-  AND admit_date IS NOT NULL
-GROUP BY personid, admit_date, source_category;
+CREATE TEMP TABLE adt_events_candidate AS
 
-/*==============================================================================
-  3. UNIFY IP + ED + OBS EVENTS (person_id-based, from your ip_raw/ed_obs_raw)
-==============================================================================*/
-DROP TABLE IF EXISTS tmp_events_2025;
-CREATE TEMP TABLE tmp_events_2025 AS
-
-SELECT
-    eventid AS event_id, personid AS person_id, 'IP' AS care_type, bedtype AS care_subtype,
-    admitdate AS event_admit_date, dischargedate AS event_discharge_date,
-    0 AS discharge_date_inferred_flag, servicefacility, providernpi, providerspecialty,
-    ipa_name, reporting_group
-FROM ip_raw
-
-UNION ALL
-
-SELECT
-    eventid AS event_id, personid AS person_id, care_setting AS care_type, care_setting AS care_subtype,
-    admitdate AS event_admit_date, dischargedate AS event_discharge_date,
-    discharge_date_inferred_flag, servicefacility, providernpi, providerspecialty,
-    ipa_name, reporting_group
-FROM ed_obs_raw;
-
-/*==============================================================================
-  4. EXACT + FUZZY MATCH — person_id based
-==============================================================================*/
-DROP TABLE IF EXISTS tmp_source_match_map;
-CREATE TEMP TABLE tmp_source_match_map AS
-
-WITH exact_match AS
-(
-    SELECT e.event_id, a.adt_event_id, a.source_category,
-           'Exact Admit Date' AS match_method, 0 AS admit_date_difference
-    FROM tmp_events_2025 e
-    INNER JOIN tmp_adt_events a
-        ON e.person_id = a.personid
-       AND e.event_admit_date = a.adt_admit_date
-),
-fuzzy_candidates AS
+WITH claim_window AS
 (
     SELECT
-        e.event_id, a.adt_event_id, a.source_category,
-        DATEDIFF(day, e.event_admit_date, a.adt_admit_date) AS admit_date_difference,
-        'Fuzzy Admit Date +/-1 Day' AS match_method,
-        ROW_NUMBER() OVER (
-            PARTITION BY e.event_id, a.source_category
-            ORDER BY ABS(DATEDIFF(day, e.event_admit_date, a.adt_admit_date))
-        ) AS event_rn,
-        ROW_NUMBER() OVER (
-            PARTITION BY a.adt_event_id
-            ORDER BY ABS(DATEDIFF(day, e.event_admit_date, a.adt_admit_date))
-        ) AS adt_rn
-    FROM tmp_events_2025 e
-    INNER JOIN tmp_adt_events a ON e.person_id = a.personid
-    LEFT JOIN exact_match ex ON e.event_id = ex.event_id AND a.source_category = ex.source_category
-    CROSS JOIN tmp_params p
-    WHERE ex.event_id IS NULL
-      AND ABS(DATEDIFF(day, e.event_admit_date, a.adt_admit_date)) <= p.fuzzy_days
-),
-fuzzy_match AS
-(
-    SELECT event_id, adt_event_id, source_category, match_method, admit_date_difference
-    FROM fuzzy_candidates
-    WHERE event_rn = 1 AND adt_rn = 1
+        DATEADD(day, -7, MIN(claim_admit_date)) AS min_candidate_date,
+        DATEADD(day,  7, MAX(claim_discharge_date)) AS max_candidate_date
+
+    FROM tmp_claims_2025
 )
-SELECT event_id, adt_event_id, source_category, match_method, admit_date_difference FROM exact_match
-UNION ALL
-SELECT event_id, adt_event_id, source_category, match_method, admit_date_difference FROM fuzzy_match;
 
-/*==============================================================================
-  5. PIVOT TO PER-EVENT SOURCE FLAGS
-==============================================================================*/
-DROP TABLE IF EXISTS tmp_event_notification_flags;
-CREATE TEMP TABLE tmp_event_notification_flags AS
 SELECT
-    event_id,
-    MAX(CASE WHEN source_category = 'HIE_ADT' THEN 1 ELSE 0 END) AS hie_adt_flag,
-    MAX(CASE WHEN source_category = 'AUTHORIZATION' THEN 1 ELSE 0 END) AS authorization_flag,
-    MAX(CASE WHEN source_category = 'EMR' THEN 1 ELSE 0 END) AS emr_flag,
-    MAX(CASE WHEN source_category = 'OTHER' THEN 1 ELSE 0 END) AS other_flag,
-    COUNT(DISTINCT source_category) AS distinct_source_count,
-    LISTAGG(DISTINCT source_category, ', ') AS sources_notified
-FROM tmp_source_match_map
-GROUP BY event_id;
+    adt.person_id AS personid,
 
-/*==============================================================================
-  6. FINAL EVENT-LEVEL RECONCILIATION TABLE
-==============================================================================*/
-DROP TABLE IF EXISTS analytics.notification_reconciliation_2025;
-CREATE TABLE analytics.notification_reconciliation_2025 AS
-SELECT
-    e.event_id, e.person_id, e.care_type, e.care_subtype,
-    e.event_admit_date, e.event_discharge_date, e.discharge_date_inferred_flag,
-    e.servicefacility, e.providernpi, e.providerspecialty, e.ipa_name, e.reporting_group,
+    CAST(adt.admit_date AS DATE) AS admit_date,
+    CAST(adt.discharge_date AS DATE) AS discharge_date,
 
-    COALESCE(f.hie_adt_flag, 0) AS hie_adt_flag,
-    COALESCE(f.authorization_flag, 0) AS authorization_flag,
-    COALESCE(f.emr_flag, 0) AS emr_flag,
-    COALESCE(f.other_flag, 0) AS other_flag,
-    COALESCE(f.distinct_source_count, 0) AS distinct_source_count,
-    f.sources_notified,
+    adt.diagnosis_date,
+    adt.insert_timestamp,
+    adt.message_timestamp,
 
-    CASE WHEN COALESCE(f.distinct_source_count, 0) = 0 THEN 1 ELSE 0 END AS no_notification_flag,
-    CASE WHEN COALESCE(f.distinct_source_count, 0) >= 2 THEN 1 ELSE 0 END AS multi_source_flag,
+    adt.adt_message_id,
+    adt.sending_source,
+    adt.event_id,
+    UPPER(TRIM(adt.message_type)) AS message_type,
+
+    adt.city,
+    adt.state,
+    adt.zip,
+
+    adt.admit_type,
+    adt.admit_source,
+    adt.payer_name,
+    adt.service_type,
+
+    adt.discharge_disposition,
+    adt.discharge_location,
+    adt.event_location,
 
     CASE
-        WHEN COALESCE(f.distinct_source_count, 0) = 0 THEN 'No Notification'
-        WHEN f.distinct_source_count = 1 THEN f.sources_notified
-        ELSE 'Multiple Sources: ' || f.sources_notified
-    END AS notification_status
-FROM tmp_events_2025 e
-LEFT JOIN tmp_event_notification_flags f ON e.event_id = f.event_id;
+        WHEN UPPER(TRIM(adt.message_type)) IN ('A01', 'A04', 'A06')
+            THEN 'ADMISSION'
 
-/*==============================================================================
-  7. COVERAGE GAP ROLLUP
-==============================================================================*/
-DROP TABLE IF EXISTS analytics.notification_coverage_gaps_2025;
-CREATE TABLE analytics.notification_coverage_gaps_2025 AS
+        WHEN UPPER(TRIM(adt.message_type)) = 'A03'
+            THEN 'DISCHARGE'
+
+        WHEN UPPER(TRIM(adt.message_type)) = 'A02'
+            THEN 'TRANSFER'
+
+        WHEN UPPER(TRIM(adt.message_type)) = 'A08'
+            THEN 'UPDATE'
+
+        ELSE 'OTHER'
+    END AS notification_role
+
+FROM qdwwh.dbo_adt adt
+
+CROSS JOIN claim_window w
+
+WHERE
+(
+       CAST(adt.admit_date AS DATE)
+           BETWEEN w.min_candidate_date AND w.max_candidate_date
+
+    OR CAST(adt.discharge_date AS DATE)
+           BETWEEN w.min_candidate_date AND w.max_candidate_date
+
+    OR CAST(adt.message_timestamp AS DATE)
+           BETWEEN w.min_candidate_date AND w.max_candidate_date
+);
+```
+
+This keeps the ADT extraction aligned with the actual claims population rather than using an arbitrary calendar-year restriction.
+
+# How to retrieve `memberno`
+
+Your current query gets `memberno` from enrollment:
+
+```sql
+REPLACE(enr.memberno, '*', '')
+```
+
+If ADT only has `person_id`, you have two reasonable choices.
+
+## Preferred
+
+Match ADT to claims using `personid`, since both sources contain it.
+
+```sql
+ON claims.personid = adt.personid
+```
+
+This avoids enrollment-snapshot ambiguity.
+
+## Alternative
+
+Create a separate person-to-member crosswalk:
+
+```sql
+DROP TABLE IF EXISTS person_member_xwalk;
+
+CREATE TEMP TABLE person_member_xwalk AS
+
 SELECT
-    reporting_group, ipa_name, servicefacility, care_type,
-    COUNT(*) AS total_events,
-    SUM(no_notification_flag) AS events_with_no_notification,
-    ROUND(100.0 * SUM(no_notification_flag) / NULLIF(COUNT(*), 0), 2) AS percent_no_notification,
-    SUM(hie_adt_flag) AS hie_adt_events,
-    SUM(authorization_flag) AS authorization_events,
-    SUM(emr_flag) AS emr_events,
-    SUM(other_flag) AS other_source_events,
-    SUM(multi_source_flag) AS multi_source_events
-FROM analytics.notification_reconciliation_2025
-GROUP BY reporting_group, ipa_name, servicefacility, care_type;
+    personid,
+    REPLACE(memberno, '*', '') AS memberno
+
+FROM
+(
+    SELECT
+        personid,
+        memberno,
+
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY personid
+            ORDER BY enddate DESC, startdate DESC
+        ) AS rn
+
+    FROM sandbox.CA_Core_Enrollment_Detail
+
+    WHERE carealliesmanagedflag = 'Y'
+      AND planpayer = 'Cigna MA'
+) x
+
+WHERE rn = 1;
+```
+
+Then left join it to ADT for descriptive purposes. Do not use that join to determine whether the ADT record is retained.
+
+# If you must retain enrollment filtering in ADT
+
+Then use a role-specific enrollment date rather than always `admit_date`.
+
+```sql
+CASE
+    WHEN UPPER(TRIM(adt.message_type)) = 'A03'
+        THEN CAST(adt.discharge_date AS DATE)
+
+    WHEN UPPER(TRIM(adt.message_type)) IN ('A01', 'A04', 'A06')
+        THEN CAST(adt.admit_date AS DATE)
+
+    ELSE COALESCE(
+        CAST(adt.discharge_date AS DATE),
+        CAST(adt.admit_date AS DATE),
+        CAST(adt.message_timestamp AS DATE)
+    )
+END AS enrollment_reference_date
+```
+
+Then:
+
+```sql
+AND enrollment_reference_date
+    BETWEEN enr.startdate AND enr.enddate
+```
+
+However, this is still less clean than letting the eligible claims population control enrollment.
+
+## Final recommendation
+
+Do **not** simply change `admit_date` to `discharge_date`.
+
+Use this design:
+
+```text
+Claims event table
+    → filters CareAllies eligibility on the claims event discharge date
+    → carries member, IPA, and reporting group attribution
+
+ADT candidate table
+    → keeps all relevant admission and discharge messages
+    → does not independently determine CareAllies eligibility
+
+Matching layer
+    → admission messages matched to claims admission date
+    → discharge messages matched to claims discharge date
+```
+
+That avoids losing 2024 admission messages for 2025 discharges and prevents conflicting enrollment attribution between claims and ADT.
