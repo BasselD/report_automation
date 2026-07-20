@@ -380,3 +380,19 @@ Run these roughly in that order — the row-count and duplicate checks first, si
 - Switched every join and grouping key from `member_id`/`memberno` to `person_id`, matching `ip_raw`/`ed_obs_raw`.
 
 One thing to sanity-check on your end: verify the actual distinct values in `sending_source` for MedHOK, EMR, and HIE feeds, since the `LIKE` patterns here are best guesses — if your feed uses different labels (e.g., a specific EHR vendor code instead of "EMR"), the `source_category` buckets will misclassify silently rather than error out.
+----
+# Dictionary
+| Column                        | Definition                                                                |
+| ----------------------------- | ------------------------------------------------------------------------- |
+| `reporting_group`             | Organizational or reporting group used for aggregation.                   |
+| `ipa_name`                    | Independent Practice Association used for aggregation.                    |
+| `servicefacility`             | Healthcare facility used for aggregation.                                 |
+| `care_type`                   | Care setting used for aggregation, such as IP, ED, or observation.        |
+| `total_events`                | Total number of healthcare events in the group.                           |
+| `events_with_no_notification` | Number of events with no matched notification source.                     |
+| `percent_no_notification`     | Percentage of events with no notification, rounded to two decimal places. |
+| `hie_adt_events`              | Number of events matched to an HIE ADT notification.                      |
+| `authorization_events`        | Number of events matched to an authorization-system notification.         |
+| `emr_events`                  | Number of events matched to an EMR notification.                          |
+| `other_source_events`         | Number of events matched to another classified notification source.       |
+| `multi_source_events`         | Number of events matched to two or more notification source categories.   |
