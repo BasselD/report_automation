@@ -1,3 +1,308 @@
+# Solution
+Yes. If MedHOK authorization records have a blank `patient_class`, they cannot independently tell you whether the authorization represents **ED, IP, or OBS**.
+
+You should not force an ADT patient class onto those records. Instead:
+
+> Match authorization using member and event dates, then inherit the care setting from the matched claims event.
+
+However, **member-date alone is not always sufficient**, especially when a member has ED, OBS, and IP events on the same date.
+
+# Recommended source-specific matching
+
+## HIE / EMR notifications
+
+Continue using:
+
+* Person/member
+* Event date
+* ADT patient class
+* Facility
+* Message type
+* Ranking
+
+## MedHOK authorization
+
+Use:
+
+1. Same `person_id`
+2. Admission-date proximity
+3. Discharge-date proximity, when available
+4. Facility agreement, when available
+5. One-to-one ranking
+6. Ambiguity control for multiple same-day claims
+
+Do **not** require `patient_class`.
+
+---
+
+# Recommended authorization match hierarchy
+
+## High-confidence match
+
+Accept when:
+
+```text
+Same person
++ exact admission date
++ exact discharge date, when both are available
+```
+
+or:
+
+```text
+Same person
++ exact admission date
++ same facility
+```
+
+## Medium-confidence match
+
+Accept when:
+
+```text
+Same person
++ admission date within ±1 day
++ only one eligible claims event in the window
+```
+
+## Ambiguous match
+
+Do not automatically accept when:
+
+```text
+Same person
++ same date
++ multiple ED/OBS/IP claims events
++ no facility or discharge-date evidence
+```
+
+Those records should be labeled:
+
+```text
+Authorization Match Ambiguous
+```
+
+rather than assigned to every event.
+
+---
+
+# Candidate join adjustment
+
+For admission matching:
+
+```sql
+INNER JOIN adt_events_candidate a
+    ON e.person_id = a.personid
+   AND a.admission_candidate_flag = 1
+   AND a.admit_date IS NOT NULL
+
+WHERE ABS
+(
+    DATEDIFF
+    (
+        day,
+        e.event_admit_date,
+        a.admit_date
+    )
+) <=
+CASE
+    WHEN a.source_category = 'AUTHORIZATION'
+        THEN 1
+    ELSE p.fuzzy_days
+END
+
+AND
+(
+       a.source_category = 'AUTHORIZATION'
+
+    OR a.patient_class = e.care_type
+
+    OR a.patient_class IS NULL
+
+    OR
+    (
+        e.care_type = 'OBS'
+        AND a.patient_class IN ('ED', 'IP')
+    )
+)
+```
+
+Use the equivalent logic for discharge matching:
+
+```sql
+AND
+(
+       a.source_category = 'AUTHORIZATION'
+
+    OR a.patient_class = e.care_type
+
+    OR a.patient_class IS NULL
+
+    OR
+    (
+        e.care_type = 'OBS'
+        AND a.patient_class IN ('ED', 'IP')
+    )
+)
+```
+
+---
+
+# Do not call it a patient-class match
+
+Update the status logic:
+
+```sql
+CASE
+    WHEN a.source_category = 'AUTHORIZATION'
+        THEN 'Authorization - Patient Class Unavailable'
+
+    WHEN a.patient_class = e.care_type
+        THEN 'Exact Patient Class'
+
+    WHEN a.patient_class IS NULL
+        THEN 'Missing Patient Class Fallback'
+
+    WHEN e.care_type = 'OBS'
+     AND a.patient_class IN ('ED', 'IP')
+        THEN 'OBS Cross-Class Fallback'
+
+    ELSE 'Unsupported Cross-Class'
+END AS patient_class_match_status
+```
+
+This makes it clear that the authorization match is not evidence that MedHOK classified the encounter as IP, ED, or OBS.
+
+---
+
+# Add an authorization match score
+
+In the authorization candidate table, add:
+
+```sql
+CASE
+    WHEN a.source_category <> 'AUTHORIZATION'
+        THEN NULL
+
+    WHEN e.event_admit_date = a.admit_date
+     AND e.event_discharge_date = a.discharge_date
+        THEN 1
+
+    WHEN e.event_admit_date = a.admit_date
+     AND facility_match_flag = 1
+        THEN 2
+
+    WHEN e.event_admit_date = a.admit_date
+        THEN 3
+
+    WHEN ABS(
+            DATEDIFF(
+                day,
+                e.event_admit_date,
+                a.admit_date
+            )
+         ) = 1
+        THEN 4
+
+    ELSE 5
+END AS authorization_match_score
+```
+
+Interpretation:
+
+| Score | Confidence                              |
+| ----: | --------------------------------------- |
+|     1 | Exact admit and discharge dates         |
+|     2 | Exact admit date and facility agreement |
+|     3 | Exact admit date                        |
+|     4 | Admit date within one day               |
+|     5 | Weak candidate                          |
+
+Rank lower scores first.
+
+---
+
+# Protect against same-day ED/OBS/IP duplication
+
+Calculate how many claim events each authorization message can match:
+
+```sql
+COUNT(*) OVER
+(
+    PARTITION BY a.adt_message_key
+) AS authorization_candidate_count
+```
+
+Also calculate how many care settings are represented:
+
+```sql
+COUNT(DISTINCT e.care_type) OVER
+(
+    PARTITION BY a.adt_message_key
+) AS authorization_care_type_count
+```
+
+If Redshift does not support `COUNT(DISTINCT ...) OVER`, calculate it in a separate grouped CTE.
+
+Then create:
+
+```sql
+CASE
+    WHEN a.source_category = 'AUTHORIZATION'
+     AND authorization_candidate_count = 1
+        THEN 'Unique Authorization Match'
+
+    WHEN a.source_category = 'AUTHORIZATION'
+     AND authorization_candidate_count > 1
+     AND facility_match_flag = 1
+        THEN 'Ranked Authorization Match'
+
+    WHEN a.source_category = 'AUTHORIZATION'
+     AND authorization_candidate_count > 1
+        THEN 'Ambiguous Authorization Match'
+
+    ELSE NULL
+END AS authorization_match_status
+```
+
+I would exclude ambiguous authorization matches from the main coverage flags until reviewed.
+
+---
+
+# Should authorization match ED?
+
+This should depend on the MedHOK business process.
+
+If MedHOK authorizations primarily represent inpatient and observation services, restrict authorization matching to:
+
+```sql
+AND
+(
+    a.source_category <> 'AUTHORIZATION'
+    OR e.care_type IN ('IP', 'OBS')
+)
+```
+
+Do not automatically match MedHOK authorization records to ED claims unless you confirm that ED encounters are represented meaningfully in the authorization workflow.
+
+# Recommended final interpretation
+
+Use authorization as a **supplemental notification source**, not as ADT patient-class evidence.
+
+Your final table should distinguish:
+
+```text
+HIE/EMR matched with confirmed patient class
+Authorization matched by member and date
+Authorization match ambiguous
+No matched notification
+```
+
+The cleanest approach is:
+
+> **Member + exact/near event date for authorization, strengthened by discharge date and facility, with one-to-one ranking and an ambiguity flag.**
+
+----
 The source classification is working. The problem is most likely **between `adt_events_candidate` and the selected-match tables**.
 
 ## Why `AUTHORIZATION` can exist but `authorization_flag` stays 0
