@@ -583,3 +583,506 @@ The two leading explanations are:
 2. **The simultaneous `claim_source_rank = 1 AND message_event_rank = 1` rule rejects otherwise valid candidates.**
 
 Run the waterfall first. If authorization reaches the candidate tables but disappears from `tmp_admission_matches` or `tmp_discharge_matches`, replace the simultaneous ranking with the sequential two-stage process above.
+---
+# qa2
+The syntax error is fixable, but the **ranking change is not yet the solution to the authorization problem**.
+
+Because authorization drops at:
+
+> **Stage 4 — Admission match candidates**
+
+the rows are disappearing **before ranking occurs**. The problem is in the candidate join criteria:
+
+```sql
+e.person_id = a.personid
+AND a.admission_candidate_flag = 1
+AND a.admit_date IS NOT NULL
+AND patient-class rule
+AND date difference <= fuzzy_days
+```
+
+## 1. Why the `ROW_NUMBER()` query failed
+
+In Redshift, `QUALIFY` immediately after a `FROM` clause can require an alias. The safest approach is to use a subquery.
+
+Also verify the table name is plural:
+
+```sql
+tmp_admission_match_candidates
+```
+
+not:
+
+```sql
+tmp_admission_match_candidate
+```
+
+### Corrected assignment query
+
+Since `message_event_rank` is already calculated in your candidate table, you do not need to calculate another `ROW_NUMBER()` yet:
+
+```sql
+DROP TABLE IF EXISTS tmp_admission_message_assignment;
+
+CREATE TEMP TABLE tmp_admission_message_assignment AS
+
+SELECT *
+FROM tmp_admission_match_candidates
+WHERE message_event_rank = 1;
+```
+
+That is functionally equivalent to:
+
+> Assign each ADT message to its highest-ranked claims event.
+
+Alternatively, the explicit subquery syntax is:
+
+```sql
+DROP TABLE IF EXISTS tmp_admission_message_assignment;
+
+CREATE TEMP TABLE tmp_admission_message_assignment AS
+
+SELECT *
+FROM
+(
+    SELECT
+        c.*,
+
+        ROW_NUMBER() OVER
+        (
+            PARTITION BY c.adt_message_key
+
+            ORDER BY
+                c.patient_class_penalty,
+                ABS(c.date_difference),
+
+                CASE
+                    WHEN c.facility_match_flag = 1 THEN 0
+                    ELSE 1
+                END,
+
+                c.message_type_priority,
+                c.insert_timestamp ASC NULLS LAST,
+                c.message_timestamp ASC NULLS LAST,
+                c.claim_event_id
+        ) AS assignment_rn
+
+    FROM tmp_admission_match_candidates c
+) ranked
+
+WHERE assignment_rn = 1;
+```
+
+But this will not recover authorization rows when none reached `tmp_admission_match_candidates`.
+
+---
+
+# 2. Find which candidate condition removes authorization
+
+Run this authorization-specific waterfall:
+
+```sql
+/*==============================================================================
+  AUTHORIZATION ADMISSION CANDIDATE DIAGNOSTIC
+
+  Each stage adds one production matching condition.
+==============================================================================*/
+
+SELECT
+    '1 - Authorization rows' AS stage,
+    COUNT(*) AS authorization_rows
+
+FROM adt_events_candidate a
+
+WHERE a.source_category = 'AUTHORIZATION'
+
+
+UNION ALL
+
+
+SELECT
+    '2 - Has admission candidate flag',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+
+
+UNION ALL
+
+
+SELECT
+    '3 - Has usable admit date',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+  AND a.admit_date IS NOT NULL
+
+
+UNION ALL
+
+
+SELECT
+    '4 - Person exists in eligible claims',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+  AND a.admit_date IS NOT NULL
+
+  AND EXISTS
+  (
+      SELECT 1
+      FROM tmp_events_2025 e
+      WHERE e.person_id = a.personid
+  )
+
+
+UNION ALL
+
+
+SELECT
+    '5 - Claim within +/-7 days',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+  AND a.admit_date IS NOT NULL
+
+  AND EXISTS
+  (
+      SELECT 1
+      FROM tmp_events_2025 e
+
+      WHERE e.person_id = a.personid
+
+        AND ABS
+        (
+            DATEDIFF
+            (
+                day,
+                e.event_admit_date,
+                a.admit_date
+            )
+        ) <= 7
+  )
+
+
+UNION ALL
+
+
+SELECT
+    '6 - Claim within production tolerance',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+CROSS JOIN tmp_params p
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+  AND a.admit_date IS NOT NULL
+
+  AND EXISTS
+  (
+      SELECT 1
+      FROM tmp_events_2025 e
+
+      WHERE e.person_id = a.personid
+
+        AND ABS
+        (
+            DATEDIFF
+            (
+                day,
+                e.event_admit_date,
+                a.admit_date
+            )
+        ) <= p.fuzzy_days
+  )
+
+
+UNION ALL
+
+
+SELECT
+    '7 - Passes patient-class rule',
+    COUNT(*)
+
+FROM adt_events_candidate a
+
+CROSS JOIN tmp_params p
+
+WHERE a.source_category = 'AUTHORIZATION'
+  AND a.admission_candidate_flag = 1
+  AND a.admit_date IS NOT NULL
+
+  AND EXISTS
+  (
+      SELECT 1
+      FROM tmp_events_2025 e
+
+      WHERE e.person_id = a.personid
+
+        AND ABS
+        (
+            DATEDIFF
+            (
+                day,
+                e.event_admit_date,
+                a.admit_date
+            )
+        ) <= p.fuzzy_days
+
+        AND
+        (
+               a.patient_class = e.care_type
+            OR a.patient_class IS NULL
+
+            OR
+            (
+                e.care_type = 'OBS'
+                AND a.patient_class IN ('ED', 'IP')
+            )
+        )
+  )
+
+
+UNION ALL
+
+
+SELECT
+    '8 - Actual admission match candidates',
+    COUNT(*)
+
+FROM tmp_admission_match_candidates
+
+WHERE source_category = 'AUTHORIZATION';
+```
+
+## How to read the result
+
+| Drop occurs between | Likely problem                                                  |
+| ------------------- | --------------------------------------------------------------- |
+| Stage 3 → 4         | Authorization `personid` does not match the claims population   |
+| Stage 4 → 5         | Authorization and claims dates are materially different         |
+| Stage 5 → 6         | The ±1-day production tolerance is too narrow for authorization |
+| Stage 6 → 7         | Authorization patient class conflicts with claims care type     |
+| Stage 7 → 8         | Candidate SQL does not match the QA rules or table is stale     |
+
+---
+
+# 3. Most likely cause: authorization date behavior
+
+Authorization data frequently has a requested, approved, or entered date that does not equal the actual admission date. Your current production match requires:
+
+```sql
+ABS(
+    DATEDIFF(
+        day,
+        e.event_admit_date,
+        a.admit_date
+    )
+) <= 1
+```
+
+That rule may be appropriate for real-time HIE messages but too strict for authorization records.
+
+Check the closest authorization-to-claims date differences:
+
+```sql
+WITH authorization_nearest_claim AS
+(
+    SELECT
+        a.adt_message_key,
+        a.personid,
+        a.admit_date AS authorization_admit_date,
+
+        MIN
+        (
+            ABS
+            (
+                DATEDIFF
+                (
+                    day,
+                    e.event_admit_date,
+                    a.admit_date
+                )
+            )
+        ) AS nearest_claim_admit_difference
+
+    FROM adt_events_candidate a
+
+    INNER JOIN tmp_events_2025 e
+        ON a.personid = e.person_id
+
+    WHERE a.source_category = 'AUTHORIZATION'
+      AND a.admission_candidate_flag = 1
+      AND a.admit_date IS NOT NULL
+
+    GROUP BY
+        a.adt_message_key,
+        a.personid,
+        a.admit_date
+)
+
+SELECT
+    CASE
+        WHEN nearest_claim_admit_difference = 0
+            THEN 'Exact Date'
+
+        WHEN nearest_claim_admit_difference = 1
+            THEN '1 Day'
+
+        WHEN nearest_claim_admit_difference BETWEEN 2 AND 3
+            THEN '2–3 Days'
+
+        WHEN nearest_claim_admit_difference BETWEEN 4 AND 7
+            THEN '4–7 Days'
+
+        WHEN nearest_claim_admit_difference BETWEEN 8 AND 14
+            THEN '8–14 Days'
+
+        ELSE 'Over 14 Days'
+    END AS nearest_date_band,
+
+    COUNT(*) AS authorization_messages
+
+FROM authorization_nearest_claim
+
+GROUP BY 1
+ORDER BY
+    MIN(nearest_claim_admit_difference);
+```
+
+If most authorization records are two or more days away, the problem is the common `fuzzy_days = 1` parameter.
+
+---
+
+# 4. Recommended source-specific tolerance
+
+ADT/HIE messages and authorization records should not necessarily use the same date tolerance.
+
+In the admission candidate query, replace:
+
+```sql
+WHERE ABS
+(
+    DATEDIFF
+    (
+        day,
+        e.event_admit_date,
+        a.admit_date
+    )
+) <= p.fuzzy_days
+```
+
+with:
+
+```sql
+WHERE ABS
+(
+    DATEDIFF
+    (
+        day,
+        e.event_admit_date,
+        a.admit_date
+    )
+) <=
+CASE
+    WHEN a.source_category = 'AUTHORIZATION'
+        THEN 7
+
+    ELSE p.fuzzy_days
+END
+```
+
+I would start with seven days for QA, then choose the final tolerance based on the nearest-date distribution.
+
+Also update `match_method`:
+
+```sql
+CASE
+    WHEN e.event_admit_date = a.admit_date
+        THEN 'Exact Admission Date'
+
+    WHEN a.source_category = 'AUTHORIZATION'
+        THEN 'Authorization Admission Date +/-7 Days'
+
+    ELSE 'ADT Admission Date +/-'
+         || CAST(p.fuzzy_days AS VARCHAR(10))
+         || ' Day'
+END AS match_method
+```
+
+---
+
+# 5. Check whether patient class removes authorization
+
+Run:
+
+```sql
+SELECT
+    COALESCE(patient_class, 'NULL') AS authorization_patient_class,
+    COUNT(*) AS authorization_rows
+
+FROM adt_events_candidate
+
+WHERE source_category = 'AUTHORIZATION'
+  AND admission_candidate_flag = 1
+  AND admit_date IS NOT NULL
+
+GROUP BY 1
+ORDER BY 2 DESC;
+```
+
+If authorization rows have unexpected non-null classes, the patient-class rule may be excluding them.
+
+Since authorization is not a real-time ADT feed, you may decide not to enforce patient class for authorization:
+
+```sql
+AND
+(
+       a.source_category = 'AUTHORIZATION'
+
+    OR a.patient_class = e.care_type
+
+    OR a.patient_class IS NULL
+
+    OR
+    (
+        e.care_type = 'OBS'
+        AND a.patient_class IN ('ED', 'IP')
+    )
+)
+```
+
+This keeps care-setting rules for ADT feeds while allowing authorization matching to rely primarily on:
+
+* Person
+* Date proximity
+* Facility when available
+* Source-specific ranking
+
+---
+
+# Recommended order
+
+1. Run the detailed authorization waterfall.
+2. Run the nearest-date distribution.
+3. Check authorization patient-class values.
+4. Correct the candidate join or tolerance.
+5. Confirm authorization rows now appear in `tmp_admission_match_candidates`.
+6. Only then apply sequential ranking.
+
+The syntax-correct assignment query will work, but it cannot recover authorization records until the candidate-generation issue is resolved.
+
