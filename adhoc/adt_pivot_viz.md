@@ -566,3 +566,476 @@ Use the helper sheets for:
 6. High-volume coverage-gap analysis
 
 This gives you normal Excel slicers and drill-down for the core presentation while avoiding duplicated event counts in the complex source-level views.
+
+---
+Use the **event-level reconciliation table** as the source. It has one row per claim event, so standard Excel PivotTables can safely use `Count of claim_event_id` without duplicate-event inflation.
+
+The extract below reduces the table to the fields needed for leadership reporting, raw-data review, pivoting, timeliness analysis, OBS methodology, and MedHOK QA.
+
+```sql
+/*==============================================================================
+  LEADERSHIP / EXCEL EVENT-LEVEL EXTRACT
+
+  Grain:
+      One row per eligible claims event
+
+  Primary uses:
+      - Leadership raw-data tab
+      - Standard Excel PivotTables
+      - Python visualizations
+      - Coverage, source contribution, timeliness, OBS, and MedHOK QA
+==============================================================================*/
+
+DROP TABLE IF EXISTS analytics.notification_leadership_extract_2025;
+
+CREATE TABLE analytics.notification_leadership_extract_2025 AS
+
+WITH event_base AS
+(
+    SELECT
+        /*--------------------------------------------------------------
+          1. EVENT IDENTITY AND ATTRIBUTION
+        --------------------------------------------------------------*/
+        claim_event_id,
+
+        /* Retain only in a secured internal workbook */
+        memberno,
+
+        care_type,
+        care_subtype,
+
+        event_admit_date,
+        event_discharge_date,
+
+        CAST(
+            DATE_TRUNC(
+                'month',
+                event_discharge_date
+            ) AS DATE
+        ) AS event_month,
+
+        EXTRACT(
+            quarter
+            FROM event_discharge_date
+        )::INTEGER AS event_quarter,
+
+        length_of_stay_days,
+
+        servicefacility,
+        ipa_name,
+        reporting_group,
+
+        /*--------------------------------------------------------------
+          2. COVERAGE FLAGS
+        --------------------------------------------------------------*/
+        COALESCE(admission_notification_flag, 0)
+            AS admission_notification_flag,
+
+        COALESCE(discharge_notification_flag, 0)
+            AS discharge_notification_flag,
+
+        COALESCE(complete_admission_discharge_flag, 0)
+            AS complete_admission_discharge_flag,
+
+        COALESCE(no_matched_notification_flag, 0)
+            AS no_matched_notification_flag,
+
+        notification_completeness_status,
+
+        admission_coverage_category,
+        discharge_coverage_category,
+
+        /*--------------------------------------------------------------
+          3. OVERALL SOURCE FLAGS
+        --------------------------------------------------------------*/
+        COALESCE(authorization_flag, 0)
+            AS authorization_flag,
+
+        COALESCE(hie_adt_flag, 0)
+            AS hie_adt_flag,
+
+        COALESCE(emr_flag, 0)
+            AS emr_flag,
+
+        COALESCE(other_flag, 0)
+            AS other_flag,
+
+        COALESCE(unclassified_flag, 0)
+            AS unclassified_flag,
+
+        CASE
+            WHEN
+                   COALESCE(hie_adt_flag, 0) = 1
+                OR COALESCE(emr_flag, 0) = 1
+                OR COALESCE(other_flag, 0) = 1
+                OR COALESCE(unclassified_flag, 0) = 1
+                THEN 1
+            ELSE 0
+        END AS non_authorization_flag,
+
+        overall_source_count,
+
+        /*--------------------------------------------------------------
+          4. ADMISSION SOURCE FLAGS
+        --------------------------------------------------------------*/
+        COALESCE(admission_authorization_flag, 0)
+            AS admission_authorization_flag,
+
+        COALESCE(admission_hie_flag, 0)
+            AS admission_hie_flag,
+
+        COALESCE(admission_emr_flag, 0)
+            AS admission_emr_flag,
+
+        COALESCE(admission_other_flag, 0)
+            AS admission_other_flag,
+
+        COALESCE(admission_unclassified_flag, 0)
+            AS admission_unclassified_flag,
+
+        CASE
+            WHEN
+                   COALESCE(admission_hie_flag, 0) = 1
+                OR COALESCE(admission_emr_flag, 0) = 1
+                OR COALESCE(admission_other_flag, 0) = 1
+                OR COALESCE(admission_unclassified_flag, 0) = 1
+                THEN 1
+            ELSE 0
+        END AS admission_non_authorization_flag,
+
+        /*--------------------------------------------------------------
+          5. DISCHARGE SOURCE FLAGS
+        --------------------------------------------------------------*/
+        COALESCE(discharge_authorization_flag, 0)
+            AS discharge_authorization_flag,
+
+        COALESCE(discharge_hie_flag, 0)
+            AS discharge_hie_flag,
+
+        COALESCE(discharge_emr_flag, 0)
+            AS discharge_emr_flag,
+
+        COALESCE(discharge_other_flag, 0)
+            AS discharge_other_flag,
+
+        COALESCE(discharge_unclassified_flag, 0)
+            AS discharge_unclassified_flag,
+
+        CASE
+            WHEN
+                   COALESCE(discharge_hie_flag, 0) = 1
+                OR COALESCE(discharge_emr_flag, 0) = 1
+                OR COALESCE(discharge_other_flag, 0) = 1
+                OR COALESCE(discharge_unclassified_flag, 0) = 1
+                THEN 1
+            ELSE 0
+        END AS discharge_non_authorization_flag,
+
+        /*--------------------------------------------------------------
+          6. EARLIEST ADMISSION NOTIFICATION
+        --------------------------------------------------------------*/
+        first_admission_source_category,
+        first_admission_sending_source,
+        first_admission_message_type,
+        first_admission_insert_timestamp,
+
+        admission_notification_lag_days,
+        admission_timeliness_category,
+
+        admission_patient_class_match_status,
+        admission_facility_match_flag,
+
+        first_admission_authorization_match_status,
+
+        /*--------------------------------------------------------------
+          7. EARLIEST DISCHARGE NOTIFICATION
+        --------------------------------------------------------------*/
+        first_discharge_source_category,
+        first_discharge_sending_source,
+        first_discharge_message_type,
+        first_discharge_insert_timestamp,
+
+        discharge_notification_lag_days,
+        discharge_timeliness_category,
+
+        discharge_patient_class_match_status,
+        discharge_facility_match_flag,
+
+        first_discharge_authorization_match_status
+
+    FROM analytics.notification_reconciliation_2025
+)
+
+SELECT
+    /*------------------------------------------------------------------
+      EVENT IDENTITY
+    ------------------------------------------------------------------*/
+    claim_event_id,
+    memberno,
+
+    care_type,
+    care_subtype,
+
+    event_admit_date,
+    event_discharge_date,
+    event_month,
+    event_quarter,
+
+    length_of_stay_days,
+
+    servicefacility,
+    ipa_name,
+    reporting_group,
+
+    /*------------------------------------------------------------------
+      COMPLETENESS AND COVERAGE
+    ------------------------------------------------------------------*/
+    admission_notification_flag,
+    discharge_notification_flag,
+    complete_admission_discharge_flag,
+    no_matched_notification_flag,
+
+    notification_completeness_status,
+
+    CASE
+        WHEN notification_completeness_status =
+             'Admission and Discharge Received'
+            THEN 1
+
+        WHEN notification_completeness_status =
+             'Admission Only'
+            THEN 2
+
+        WHEN notification_completeness_status =
+             'Discharge Only'
+            THEN 3
+
+        WHEN notification_completeness_status =
+             'No Matched Notification'
+            THEN 4
+
+        ELSE 9
+    END AS notification_status_sort,
+
+    admission_coverage_category,
+    discharge_coverage_category,
+
+    /*------------------------------------------------------------------
+      OVERALL SOURCE CONTRIBUTION
+    ------------------------------------------------------------------*/
+    authorization_flag,
+    non_authorization_flag,
+
+    hie_adt_flag,
+    emr_flag,
+    other_flag,
+    unclassified_flag,
+
+    overall_source_count,
+
+    CASE
+        WHEN authorization_flag = 1
+         AND non_authorization_flag = 1
+            THEN 'Authorization + Non-Authorization'
+
+        WHEN authorization_flag = 0
+         AND non_authorization_flag = 1
+            THEN 'Non-Authorization Only'
+
+        WHEN authorization_flag = 1
+         AND non_authorization_flag = 0
+            THEN 'Authorization Only'
+
+        ELSE 'No Matched Notification'
+    END AS source_contribution_segment,
+
+    /*------------------------------------------------------------------
+      ADMISSION SOURCE CONTRIBUTION
+    ------------------------------------------------------------------*/
+    admission_authorization_flag,
+    admission_non_authorization_flag,
+
+    CASE
+        WHEN admission_authorization_flag = 1
+         AND admission_non_authorization_flag = 1
+            THEN 'Authorization + Non-Authorization'
+
+        WHEN admission_authorization_flag = 0
+         AND admission_non_authorization_flag = 1
+            THEN 'Non-Authorization Only'
+
+        WHEN admission_authorization_flag = 1
+         AND admission_non_authorization_flag = 0
+            THEN 'Authorization Only'
+
+        ELSE 'No Matched Admission'
+    END AS admission_source_contribution_segment,
+
+    /*------------------------------------------------------------------
+      DISCHARGE SOURCE CONTRIBUTION
+    ------------------------------------------------------------------*/
+    discharge_authorization_flag,
+    discharge_non_authorization_flag,
+
+    CASE
+        WHEN discharge_authorization_flag = 1
+         AND discharge_non_authorization_flag = 1
+            THEN 'Authorization + Non-Authorization'
+
+        WHEN discharge_authorization_flag = 0
+         AND discharge_non_authorization_flag = 1
+            THEN 'Non-Authorization Only'
+
+        WHEN discharge_authorization_flag = 1
+         AND discharge_non_authorization_flag = 0
+            THEN 'Authorization Only'
+
+        ELSE 'No Matched Discharge'
+    END AS discharge_source_contribution_segment,
+
+    /*------------------------------------------------------------------
+      EARLIEST ADMISSION NOTIFICATION
+    ------------------------------------------------------------------*/
+    first_admission_source_category,
+    first_admission_sending_source,
+    first_admission_message_type,
+    first_admission_insert_timestamp,
+
+    admission_notification_lag_days,
+    admission_timeliness_category,
+
+    admission_patient_class_match_status,
+    admission_facility_match_flag,
+
+    first_admission_authorization_match_status,
+
+    /*------------------------------------------------------------------
+      EARLIEST DISCHARGE NOTIFICATION
+    ------------------------------------------------------------------*/
+    first_discharge_source_category,
+    first_discharge_sending_source,
+    first_discharge_message_type,
+    first_discharge_insert_timestamp,
+
+    discharge_notification_lag_days,
+    discharge_timeliness_category,
+
+    discharge_patient_class_match_status,
+    discharge_facility_match_flag,
+
+    first_discharge_authorization_match_status
+
+FROM event_base;
+```
+
+## Resulting extract
+
+This produces approximately **55 columns**, rather than more than 80, while retaining the fields required for:
+
+* Notification completeness
+* Admission versus discharge coverage
+* Authorization contribution
+* Non-authorization contribution
+* IPA and facility comparisons
+* Monthly trends
+* Timeliness
+* Observation methodology
+* MedHOK match-confidence backup
+* Event-level raw-data review
+
+## Columns to show first in the Excel raw-data tab
+
+Freeze these columns on the left:
+
+```text
+claim_event_id
+memberno
+care_type
+event_admit_date
+event_discharge_date
+event_month
+servicefacility
+ipa_name
+reporting_group
+notification_completeness_status
+source_contribution_segment
+admission_notification_lag_days
+discharge_notification_lag_days
+```
+
+The remaining columns can stay to the right for drill-down.
+
+## Safest fields for standard PivotTables
+
+Because this table remains one row per event, use:
+
+| Pivot metric               | Excel aggregation                              |
+| -------------------------- | ---------------------------------------------- |
+| Total events               | Count of `claim_event_id`                      |
+| Admission coverage rate    | Average of `admission_notification_flag`       |
+| Discharge coverage rate    | Average of `discharge_notification_flag`       |
+| Complete coverage rate     | Average of `complete_admission_discharge_flag` |
+| No matched rate            | Average of `no_matched_notification_flag`      |
+| Authorization coverage     | Average of `authorization_flag`                |
+| Non-authorization coverage | Average of `non_authorization_flag`            |
+
+Format averages of the binary flags as percentages.
+
+## Best pivots from this single extract
+
+### Completeness
+
+```text
+Rows: care_type
+Columns: notification_completeness_status
+Values: Count of claim_event_id
+Show values as: % of Row Total
+```
+
+### Source contribution
+
+```text
+Rows: care_type
+Columns: source_contribution_segment
+Values: Count of claim_event_id
+Show values as: % of Row Total
+```
+
+### Monthly coverage trend
+
+```text
+Rows: event_month
+Columns: care_type
+Values:
+    Average of complete_admission_discharge_flag
+    Average of no_matched_notification_flag
+```
+
+### Facility and IPA gaps
+
+```text
+Rows:
+    reporting_group
+    ipa_name
+    servicefacility
+
+Columns:
+    care_type
+
+Values:
+    Count of claim_event_id
+    Average of complete_admission_discharge_flag
+    Average of no_matched_notification_flag
+```
+
+### Timeliness
+
+```text
+Rows: care_type
+Columns: discharge_timeliness_category
+Values: Count of claim_event_id
+Show values as: % of Row Total
+```
+
+For a leadership-shared workbook, consider removing `memberno` from the distributed version while retaining it in a secured internal QA version.
+
