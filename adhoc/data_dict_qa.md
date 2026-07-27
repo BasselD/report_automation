@@ -1859,3 +1859,69 @@ percent_no_matched_notification
 ```
 
 The business logic does not change; the new names simply make the limitation explicit.
+
+--- 
+The feedback is valid. The current pivot does not answer ADT/HIE coverage, mainly for three reasons.
+
+What the manager is seeing
+
+1. “Hit” currently means any selected notification match, including MedHOK authorization. It does not specifically mean an ADT or HIE feed match.
+2. The percentages shown are column percentages. For example, the 7% under HIE_ADT means 7% of the 98 records labeled HIE_ADT belong to the Top 6—not that 7% of Top 6 claims have HIE coverage.
+3. OTHER is overstated because several actual hospital or exchange sources—such as HSX, Tenet, Houston Methodist, and Ascension—were not normalized and therefore defaulted to OTHER.
+4. A single source_category field can hide multi-source events. An event may have both authorization and a hospital ADT notification but appear under only one category depending on which source was selected.
+5. The prior 63% complete-notification result includes authorization, so it should not be described as ADT/HIE coverage.
+
+Recommended second pass
+
+Redefine the primary metric
+
+An ADT/HIE hit should be:
+
+A distinct claims event with at least one selected admission or discharge message from a validated HIE or direct facility ADT feed, excluding MedHOK authorization.
+
+Report the following separately:
+
+* ADT/HIE admission coverage
+* ADT/HIE discharge coverage
+* Complete ADT/HIE coverage
+* Any ADT/HIE coverage
+* No ADT/HIE coverage
+
+Create four exclusive contribution categories
+
+ADT/HIE and Authorization
+ADT/HIE Only
+Authorization Only
+Neither
+
+This directly shows whether TOC visibility is coming from real-time feeds, authorization, both, or neither.
+
+Normalize the source taxonomy
+
+Build a mapping table with:
+
+Raw sending source	Normalized source	Feed type
+HSX	HealthShare Exchange	HIE
+Greater Houston Health Connect	GHHC	HIE
+Tenet Health	Tenet Health	Direct Facility ADT
+Houston Methodist Hospital	Houston Methodist	Direct Facility ADT
+MedHOK	MedHOK	Authorization
+Unrecognized value	Pending review	Unknown
+
+Do not classify a hospital name as HIE unless validated; classify it as Direct Facility ADT.
+
+Present coverage using the correct denominator
+
+For each Top 6 indicator and care setting:
+
+Distinct claims events with ADT/HIE match
+÷
+Total eligible claims events
+
+The final view should resemble:
+
+Top 6	Care setting	Total claims	Any ADT/HIE	ADT/HIE coverage	Authorization only	Neither
+
+Suggested response
+
+Thanks—this is a fair concern. The current “hit” definition represents any selected notification match, including MedHOK authorization, and was not designed to isolate ADT/HIE coverage. In addition, many hospital and exchange source names defaulted to “Other,” and the percentages shown are distributions by Top 6 status rather than claims-based coverage rates. I will revise the analysis by normalizing the source taxonomy, excluding authorization from the ADT/HIE numerator, and reporting ADT/HIE only, authorization only, both, and neither against the total claims denominator. This will directly show our transition-of-care feed coverage by Top 6, care setting, market, and facility.
