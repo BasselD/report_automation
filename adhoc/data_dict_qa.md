@@ -1925,3 +1925,45 @@ Top 6	Care setting	Total claims	Any ADT/HIE	ADT/HIE coverage	Authorization only	
 Suggested response
 
 Thanks—this is a fair concern. The current “hit” definition represents any selected notification match, including MedHOK authorization, and was not designed to isolate ADT/HIE coverage. In addition, many hospital and exchange source names defaulted to “Other,” and the percentages shown are distributions by Top 6 status rather than claims-based coverage rates. I will revise the analysis by normalizing the source taxonomy, excluding authorization from the ADT/HIE numerator, and reporting ADT/HIE only, authorization only, both, and neither against the total claims denominator. This will directly show our transition-of-care feed coverage by Top 6, care setting, market, and facility.
+
+--
+**Subject: Consolidated responses on ADT/HIE coverage and source definitions**
+
+I bundled my responses into one email from your separate questions from separate threads.
+
+**1. How is a “hit” currently defined, and does the report represent ADT/HIE coverage?**
+A hit currently means that a claims event had at least one selected notification match based on member, event date, care-setting rules, and matching/ranking criteria. This can include a clinical ADT message, an EMR-labeled source, another hospital source, or MedHOK authorization. Therefore, the current hit rate should not be interpreted as pure ADT/HIE coverage.
+
+Your concern is valid: the existing source categorization is too dependent on the text in `sending_source`, causing many potentially valid hospital or HIE feeds to fall into `OTHER`. I will take another pass with the explicit goal of measuring TOC coverage from validated ADT/HIE feeds, separately from authorization.
+
+The revised view will distinguish:
+
+* ADT/HIE and Authorization
+* ADT/HIE only
+* Authorization only
+* Neither
+
+**2. How are the current source fields defined?**
+
+* **Authorization:** `sending_source` contains `MEDHOK`.
+* **HIE_ADT:** `sending_source` contains `HIE`.
+* **EMR:** `sending_source` contains `EMR`, `EPIC`, or `CERNER`.
+* **Other:** `sending_source` is populated but does not meet one of the above text rules.
+* **Unclassified:** `sending_source` is blank or null.
+
+These are technical classifications from the current script, not a validated source taxonomy. In particular, `OTHER` may contain direct hospital ADT feeds or HIE sources whose names do not explicitly include “HIE.”
+
+**3. How can we identify the specific HIE feed associated with a matched event?**
+The current detail output retains `sending_source` and `event_location`, which provide the hospital or source name, but they do not consistently identify the upstream HIE.
+
+The underlying ADT table also contains:
+
+* `connector_source_filename`
+* `connector_source_id`
+* `event_location`
+* `event_id`
+
+I can add the connector fields to the match-detail output so each matched event can be traced back to its source file and connector ID. However, the connector IDs and filenames are not sufficiently self-describing to reliably determine whether they represent HSX, Greater Houston Health Connect, KeyHIE, or another feed. I will need confirmation from our Arcadia Foundry data representative on the connector-source mapping before labeling specific HIE coverage.
+
+Once that mapping is confirmed, I can provide ADT/HIE coverage by Top 6 status, care setting, market, facility, and individual feed.
+
